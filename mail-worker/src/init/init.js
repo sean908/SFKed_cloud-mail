@@ -32,8 +32,61 @@ const dbInit = {
 		await this.v3_1DB(c);
 		await this.v3_2DB(c);
 		await this.v3_3DB(c);
+		await this.v3_4DB(c);
 		await settingService.refresh(c);
 		return c.text('success');
+	},
+
+	async v3_4DB(c) {
+		try {
+			await c.env.db.batch([
+				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN sendkit_tokens TEXT NOT NULL DEFAULT '{}';`),
+				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN send_providers TEXT NOT NULL DEFAULT '{}';`),
+				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN sendkit_webhook_secret TEXT NOT NULL DEFAULT '';`)
+			]);
+		} catch (e) {
+			console.warn(`跳过字段：${e.message}`);
+		}
+
+		try {
+			await c.env.db.prepare(`
+				CREATE TABLE IF NOT EXISTS email_provider_message (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					email_id INTEGER NOT NULL,
+					provider TEXT NOT NULL,
+					provider_message_id TEXT NOT NULL,
+					recipient TEXT NOT NULL DEFAULT '',
+					status INTEGER NOT NULL DEFAULT 0,
+					message TEXT,
+					last_event_at DATETIME,
+					create_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+					update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+				)
+			`).run();
+		} catch (e) {
+			console.warn(`跳过表：${e.message}`);
+		}
+
+		try {
+			await c.env.db.batch([
+				c.env.db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_epm_provider_msgid ON email_provider_message(provider, provider_message_id)`),
+				c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_epm_email_id ON email_provider_message(email_id)`)
+			]);
+		} catch (e) {
+			console.warn(`跳过索引：${e.message}`);
+		}
+
+		// 把历史 Resend 发送回填为 provider=resend 的映射记录（保留 email.resend_email_id 兼容）。
+		try {
+			await c.env.db.prepare(`
+				INSERT OR IGNORE INTO email_provider_message (email_id, provider, provider_message_id, recipient, status)
+				SELECT email_id, 'resend', resend_email_id, to_email, status
+				FROM email
+				WHERE resend_email_id IS NOT NULL AND resend_email_id != ''
+			`).run();
+		} catch (e) {
+			console.warn(`跳过回填：${e.message}`);
+		}
 	},
 
 	async v3_3DB(c) {

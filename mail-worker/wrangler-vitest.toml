@@ -1,0 +1,20 @@
+name = "cloud-mail-vitest"
+main = "src/index.js"
+compatibility_date = "2025-03-10"
+compatibility_flags = ["nodejs_compat"]
+keep_vars = true
+
+# 仅供 vitest（@cloudflare/vitest-pool-workers）使用，本地 miniflare 提供 D1/KV。
+[[d1_databases]]
+binding = "db"
+database_name = "test-email"
+database_id = "e65f099d-796d-4eaa-8dff-529b368b20db"
+
+[[kv_namespaces]]
+binding = "kv"
+id = "9be10cd058e04c55b526f8c0c116f50c"
+
+[vars]
+domain = ["example.com"]
+admin = "admin@example.com"
+jwt_secret = "test-jwt-secret"

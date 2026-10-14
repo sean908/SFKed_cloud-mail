@@ -47,7 +47,7 @@ With only one domain, you can create multiple different email addresses, similar
 
 - **💻 Responsive Design**: Automatically adapts to both desktop and most mobile browsers.
 
-- **📧 Email Sending**: Integrated with Resend, supporting bulk email sending and attachments.
+- **📧 Email Sending**: Multi-provider sending (Cloudflare / Resend / SendKit) selectable per sending domain, with bulk sending, inline images and attachments.
 
 - **🛡️ Admin Features**: Admin controls for user and email management with RBAC-based access control.
 
@@ -79,13 +79,31 @@ With only one domain, you can create multiple different email addresses, similar
 
 - **UI Framework**: [Element Plus](https://element-plus.org/)
 
-- **Email Service**: [Resend](https://resend.com/)
+- **Email Service**: [Resend](https://resend.com/), [SendKit](https://sendkit.dev/)
 
 - **Cache**: [Cloudflare KV](https://developers.cloudflare.com/kv/)
 
 - **Database**: [Cloudflare D1](https://developers.cloudflare.com/d1/)
 
 - **File Storage**: [Cloudflare R2](https://developers.cloudflare.com/r2/)
+
+## Email Sending (multi-provider)
+
+The sending provider can be chosen per sending domain under "System Settings -> Send Service":
+
+- **Cloudflare Email**: used by default once the `send_email` binding is configured (no API key).
+- **Resend**: configure a Resend API token for the domain.
+- **SendKit**: configure a SendKit API key for the domain.
+
+Without an explicit choice the order is Cloudflare -> Resend -> SendKit. If the selected provider has no credentials the send fails immediately instead of falling back, to avoid duplicate emails.
+
+### SendKit notes
+
+- Prerequisite: verify the sending domain (DNS) in your SendKit account first. The official docs contradict themselves about subdomain support, so **whether a second-level domain works must be confirmed against your actual account**.
+- API key: stored per domain in "System Settings -> Send Service", returned masked only, and never written to the frontend bundle, logs or error responses.
+- Webhook: set the HTTPS callback URL to `/webhooks/sendkit` in the SendKit dashboard and fill in the webhook signing secret (HMAC-SHA256, header `X-Webhook-Signature`).
+- Inline images: SendKit uses R2 public URLs (R2 and a public domain are required); regular attachments are sent as Base64. At most 50 recipients and 10 attachments per request.
+- No extra Wrangler binding and no `@sendkitdev/sdk` dependency are required.
 
 ## Project Structure
 

@@ -1,13 +1,13 @@
-import emailService from './email-service';
+import emailProviderMessageService from './email-provider-message-service';
 import { emailConst } from '../const/entity-const';
 import BizError from '../error/biz-error';
+import { SEND_PROVIDER } from '../lib/send-provider';
 
 const resendService = {
 
 	async webhooks(c, body) {
 
 		const params = {
-			resendEmailId: body.data.email_id,
 			status: emailConst.status.SENT
 		}
 
@@ -38,11 +38,14 @@ const resendService = {
 			params.message = body.data.failed.reason
 		}
 
-		const emailRow = await emailService.updateEmailStatus(c, params)
+		const providerMessageId = body.data.email_id;
+		const mapping = await emailProviderMessageService.findByProviderMessageId(c, SEND_PROVIDER.RESEND, providerMessageId);
 
-		if (!emailRow) {
+		if (!mapping) {
 			throw new BizError('更新邮件状态记录失败');
 		}
+
+		await emailProviderMessageService.applyStatus(c, mapping, params.status, params.message ?? null, body.created_at);
 
 	}
 }

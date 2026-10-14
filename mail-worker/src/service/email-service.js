@@ -23,6 +23,10 @@ import domainUtils from '../utils/domain-uitls';
 import account from "../entity/account";
 import { att } from '../entity/att';
 import telegramService from './telegram-service';
+import { resolveSendProvider, providerHasCredentials, SEND_PROVIDER } from '../lib/send-provider';
+import sendkitService from './sendkit-service';
+import emailProviderMessageService from './email-provider-message-service';
+import r2Service from './r2-service';
 
 const emailService = {
 
@@ -261,7 +265,7 @@ const emailService = {
 			attachments = [] //附件
 		} = params;
 
-		const { resendTokens, r2Domain, send, domainList } = await settingService.query(c);
+		const { resendTokens, sendkitTokens, sendProviders, r2Domain, send, domainList } = await settingService.query(c);
 
 		let { imageDataList, html } = await attService.toImageUrlHtml(c, content);
 
@@ -327,12 +331,27 @@ const emailService = {
 		}
 
 		const domain = emailUtils.getDomain(accountRow.email);
-		const resendToken = resendTokens[domain];
-		const useCloudflareEmail = !!c.env.email;
+		const providerContext = {
+			sendProviders,
+			sendkitTokens,
+			resendTokens,
+			hasCloudflareEmail: !!c.env.email
+		};
+		const provider = resolveSendProvider(providerContext, domain);
 
-		//如果接收方存在站外邮箱，又没有发信服务
-		if (!useCloudflareEmail && !resendToken && !allInternal) {
+		//接收方存在站外邮箱，却没有可用的发信服务（含显式选择但缺凭据）时不自动降级
+		if (!allInternal && (!provider || !providerHasCredentials(provider, providerContext, domain))) {
 			throw new BizError(t('noSendProvider'));
+		}
+
+		//SendKit 的发送前置校验：超限直接拒绝，不做部分发送或自动分批
+		if (!allInternal && provider === SEND_PROVIDER.SENDKIT) {
+			if (receiveEmail.length > sendkitService.MAX_RECIPIENTS) {
+				throw new BizError(t('sendkitRecipientLimit'));
+			}
+			if ((attachments?.length || 0) > sendkitService.MAX_ATTACHMENTS) {
+				throw new BizError(t('attLimit'));
+			}
 		}
 
 		//没有发件人名字自动截取
@@ -355,44 +374,43 @@ const emailService = {
 
 		}
 
-		let sendResult = {};
+		let sendResult = { ids: [] };
 
-		//存在站外邮箱时，如果配置了 Cloudflare Email Service 就优先使用，否则使用 Resend
+		//存在站外邮箱时，按解析出的 provider 发信
 		if (!allInternal) {
 
-			if (useCloudflareEmail) {
+			const sendParams = {
+				name,
+				accountEmail: accountRow.email,
+				receiveEmail,
+				subject,
+				text,
+				sendType,
+				messageId: emailRow.messageId
+			};
+
+			if (provider === SEND_PROVIDER.CLOUDFLARE) {
 				sendResult = await this.sendByCloudflareEmail(c, {
-					name,
-					accountEmail: accountRow.email,
-					receiveEmail,
-					subject,
-					text,
+					...sendParams,
 					html,
-					attachments: [...imageDataList, ...attachments],
-					sendType,
-					messageId: emailRow.messageId
+					attachments: [...imageDataList, ...attachments]
 				});
-			} else {
-				sendResult = await this.sendByResend(resendToken, {
-					name,
-					accountEmail: accountRow.email,
-					receiveEmail,
-					subject,
-					text,
+			} else if (provider === SEND_PROVIDER.RESEND) {
+				sendResult = await this.sendByResend(resendTokens[domain], {
+					...sendParams,
 					html,
-					attachments: [...imageDataList, ...attachments],
-					sendType,
-					messageId: emailRow.messageId
+					attachments: [...imageDataList, ...attachments]
+				});
+			} else if (provider === SEND_PROVIDER.SENDKIT) {
+				sendResult = await this.sendBySendkit(c, sendkitTokens[domain], {
+					...sendParams,
+					html,
+					attachments,
+					imageDataList,
+					r2Domain
 				});
 			}
 
-		}
-
-		const { data, error } = sendResult;
-
-
-		if (error) {
-			throw new BizError(error.message);
 		}
 
 		imageDataList = imageDataList.map(item => ({...item, contentId: `<${item.contentId}>`}))
@@ -408,10 +426,10 @@ const emailService = {
 		emailData.content = html;
 		emailData.text = text;
 		emailData.accountId = accountId;
-		emailData.status = useCloudflareEmail ? emailConst.status.DELIVERED : emailConst.status.SENT;
+		emailData.status = provider === SEND_PROVIDER.CLOUDFLARE ? emailConst.status.DELIVERED : emailConst.status.SENT;
 		emailData.type = emailConst.type.SEND;
 		emailData.userId = userId;
-		emailData.resendEmailId = data?.id;
+		emailData.resendEmailId = provider === SEND_PROVIDER.RESEND ? (sendResult.ids?.[0] ?? null) : null;
 
 		const recipient = [];
 
@@ -433,6 +451,17 @@ const emailService = {
 
 		//保存到数据库并返回结果
 		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
+
+		//写入 provider 消息映射（多收件人按顺序逐条）
+		if (!allInternal && sendResult.ids?.length) {
+			await emailProviderMessageService.saveMappings(c, {
+				emailId: emailResult.emailId,
+				provider,
+				ids: sendResult.ids,
+				recipients: receiveEmail,
+				status: emailData.status
+			});
+		}
 
 		//保存内嵌附件
 		if (imageDataList.length > 0) {
@@ -501,11 +530,7 @@ const emailService = {
 
 		const result = await c.env.email.send(sendForm);
 
-		return {
-			data: {
-				id: result.messageId
-			}
-		};
+		return { ids: [result.messageId] };
 	},
 
 	async sendByResend(resendToken, params) {
@@ -527,7 +552,93 @@ const emailService = {
 			};
 		}
 
-		return await resend.emails.send(sendForm);
+		const { data, error } = await resend.emails.send(sendForm);
+
+		if (error) {
+			throw new BizError(error.message);
+		}
+
+		return { ids: [data.id] };
+	},
+
+	// SendKit：内嵌图片改写为 R2 公网 URL，普通附件仍以 Base64 发送。
+	async sendBySendkit(c, apiKey, params) {
+		const { imageDataList = [], r2Domain, attachments = [] } = params;
+		const hasInline = imageDataList.length > 0;
+		const r2Base = domainUtils.toOssDomain(r2Domain);
+
+		if (hasInline && (!c.env.r2 || !r2Base)) {
+			throw new BizError(t('noOsSendPic'));
+		}
+
+		const uploadedKeys = [];
+		let html = params.html;
+
+		try {
+
+			if (hasInline) {
+				for (const image of imageDataList) {
+					if (!image.buff || !image.key || uploadedKeys.includes(image.key)) {
+						continue;
+					}
+					await r2Service.putObj(c, image.key, image.buff, {
+						contentType: image.mimeType,
+						cacheControl: 'max-age=259200',
+						contentDisposition: `inline;filename=${image.filename}`
+					});
+					uploadedKeys.push(image.key);
+				}
+				html = this.cidToUrl(html, imageDataList, r2Base);
+			}
+
+			const payload = sendkitService.buildPayload({
+				name: params.name,
+				accountEmail: params.accountEmail,
+				receiveEmail: params.receiveEmail,
+				subject: params.subject,
+				text: params.text,
+				html,
+				sendType: params.sendType,
+				messageId: params.messageId,
+				attachments: await this.toResendAttachments(attachments)
+			});
+
+			return await sendkitService.send({ apiKey, payload });
+
+		} catch (e) {
+			// provider 失败时清理本次预上传对象
+			for (const key of uploadedKeys) {
+				try {
+					await r2Service.delete(c, key);
+				} catch (cleanupError) {
+					console.error('清理预上传对象失败:', cleanupError);
+				}
+			}
+			throw e;
+		}
+	},
+
+	cidToUrl(content, imageDataList, r2Base) {
+		if (!content) {
+			return content;
+		}
+
+		const { document } = parseHTML(content);
+		const images = Array.from(document.querySelectorAll('img'));
+
+		for (const img of images) {
+			const src = img.getAttribute('src');
+			if (!src || !src.startsWith('cid:')) {
+				continue;
+			}
+			const cid = src.replace(/^cid:/, '');
+			const att = imageDataList.find(item => String(item.contentId).replace(/^<|>$/g, '') === cid);
+			if (att?.key) {
+				img.setAttribute('src', `${r2Base}/${att.key}`);
+			}
+		}
+
+		return document.toString();
 	},
 
 	async toCloudflareAttachments(attachments) {

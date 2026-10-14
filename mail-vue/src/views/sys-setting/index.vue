@@ -205,6 +205,15 @@
                 </div>
               </div>
               <div class="setting-item">
+                <div><span>{{ $t('sendProvider') }}</span></div>
+                <div>
+                  <el-button class="opt-button" style="margin-top: 0" @click="openSendProvider" size="small"
+                             type="primary">
+                    <Icon icon="fluent:settings-48-regular" width="16" height="16"/>
+                  </el-button>
+                </div>
+              </div>
+              <div class="setting-item">
                 <div><span>{{ $t('blackList') }}</span></div>
                 <div>
                   <el-button class="opt-button" style="margin-top: 0" @click="openBlackListForm" size="small"
@@ -514,6 +523,43 @@
           </el-select>
           <el-input type="text" :placeholder="$t('addResendTokenDesc')" v-model="resendTokenForm.token" @keyup.enter="saveResendToken"/>
           <el-button type="primary" :loading="settingLoading" @click="saveResendToken">{{ $t('save') }}</el-button>
+        </form>
+      </el-dialog>
+      <el-dialog v-model="sendProviderShow" :title="$t('sendProvider')" width="460">
+        <form @submit.prevent>
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px" v-for="item in providerRows" :key="item.domain">
+            <span style="flex: 1">{{ item.domain }}</span>
+            <el-select v-model="providerDraft[item.domain]" size="small" style="width: 140px"
+                       @change="saveProvider(item.domain)">
+              <el-option :label="$t('providerDefault')" value=""/>
+              <el-option label="Cloudflare" value="cloudflare"/>
+              <el-option label="Resend" value="resend"/>
+              <el-option label="SendKit" value="sendkit"/>
+            </el-select>
+            <el-button size="small" @click="openSendkitToken(item.domain)">
+              {{ item.hasToken ? $t('sendkitTokenSet') : $t('sendkitToken') }}
+            </el-button>
+          </div>
+          <el-divider/>
+          <div style="color: #999; font-size: 12px">{{ setting.hasCfEmail ? $t('cloudflareEmailSending') : $t('cloudflareEmailDisabled') }}</div>
+          <el-input style="margin-top: 10px" :placeholder="$t('sendkitWebhookSecret')"
+                    v-model="sendkitWebhookSecretInput" @keyup.enter="saveSendkitWebhookSecret"/>
+          <div style="color: #999; font-size: 12px; margin: 6px 0">{{ $t('sendkitWebhookHint') }}</div>
+          <el-button type="primary" :loading="settingLoading" @click="saveSendkitWebhookSecret">{{ $t('save') }}</el-button>
+        </form>
+      </el-dialog>
+      <el-dialog v-model="sendkitTokenShow" :title="$t('sendkitToken')" width="340" @closed="sendkitTokenForm.token = ''">
+        <form @submit.prevent>
+          <el-select style="margin-bottom: 15px" v-model="sendkitTokenForm.domain" placeholder="Select">
+            <el-option
+                v-for="item in settingStore.domainList"
+                :key="item"
+                :label="item"
+                :value="item"
+            />
+          </el-select>
+          <el-input type="text" :placeholder="$t('addSendkitTokenDesc')" v-model="sendkitTokenForm.token" @keyup.enter="saveSendkitToken"/>
+          <el-button type="primary" :loading="settingLoading" @click="saveSendkitToken">{{ $t('save') }}</el-button>
         </form>
       </el-dialog>
       <el-dialog v-model="r2DomainShow" :title="$t('addOsDomain')" width="340"
@@ -1074,6 +1120,11 @@ const webhookStatus = ref(1)
 const webhookRetry = ref(0)
 const webhookSecret = ref('')
 const webhookFormatShow = ref(false)
+const sendProviderShow = ref(false)
+const providerDraft = ref({})
+const sendkitTokenShow = ref(false)
+const sendkitTokenForm = ref({ domain: '', token: '' })
+const sendkitWebhookSecretInput = ref('')
 const webhookPayloadExample = `{
   "emailId": 1,
   "sendEmail": "hello@example.com",
@@ -1665,9 +1716,48 @@ function saveResendToken() {
   editSetting(settingForm)
 }
 
+const providerRows = computed(() => (settingStore.domainList || []).map(item => {
+  const domain = item.startsWith('@') ? item.slice(1) : item
+  return {
+    domain,
+    hasToken: !!(setting.value.sendkitTokens && setting.value.sendkitTokens[domain])
+  }
+}))
+
+function openSendProvider() {
+  providerDraft.value = {...(setting.value.sendProviders || {})}
+  sendkitWebhookSecretInput.value = ''
+  sendProviderShow.value = true
+}
+
+function saveProvider(domain) {
+  const sendProviders = {}
+  sendProviders[domain] = providerDraft.value[domain] || ''
+  editSetting({sendProviders})
+}
+
+function openSendkitToken(domain) {
+  sendkitTokenForm.value = {domain: '@' + domain, token: ''}
+  sendkitTokenShow.value = true
+}
+
+function saveSendkitToken() {
+  const domain = sendkitTokenForm.value.domain.slice(1)
+  const sendkitTokens = {}
+  sendkitTokens[domain] = sendkitTokenForm.value.token
+  editSetting({sendkitTokens})
+}
+
+function saveSendkitWebhookSecret() {
+  editSetting({sendkitWebhookSecret: sendkitWebhookSecretInput.value.trim()})
+}
+
 function backupSetting() {
   const settingForm = {...setting.value}
   delete settingForm.resendTokens
+  delete settingForm.sendkitTokens
+  delete settingForm.sendProviders
+  delete settingForm.sendkitWebhookSecret
   delete settingForm.siteKey
   delete settingForm.secretKey
   backup = JSON.stringify(setting.value)
@@ -1692,6 +1782,9 @@ function change(e) {
   delete settingForm.s3SecretKey
   delete settingForm.tgBotToken
   delete settingForm.resendTokens
+  delete settingForm.sendkitTokens
+  delete settingForm.sendProviders
+  delete settingForm.sendkitWebhookSecret
   editSetting(settingForm, false)
 }
 
@@ -1732,6 +1825,7 @@ function editSetting(settingForm, refreshStatus = true) {
     editTitleShow.value = false
     r2DomainShow.value = false
     resendTokenFormShow.value = false
+    sendkitTokenShow.value = false
     turnstileShow.value = false
     tgSettingShow.value = false
     thirdEmailShow.value = false

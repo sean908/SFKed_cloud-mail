@@ -11,11 +11,27 @@ import verifyRecordService from './verify-record-service';
 import userContext from '../security/user-context';
 import domainUtils from '../utils/domain-uitls';
 
+function toJsonObject(value) {
+	if (value && typeof value === 'object') {
+		return value;
+	}
+	if (typeof value === 'string' && value) {
+		try {
+			return JSON.parse(value);
+		} catch (e) {
+			return {};
+		}
+	}
+	return {};
+}
+
 const settingService = {
 
 	async refresh(c) {
 		const settingRow = await orm(c).select().from(setting).get();
-		settingRow.resendTokens = JSON.parse(settingRow.resendTokens);
+		settingRow.resendTokens = toJsonObject(settingRow.resendTokens);
+		settingRow.sendkitTokens = toJsonObject(settingRow.sendkitTokens);
+		settingRow.sendProviders = toJsonObject(settingRow.sendProviders);
 		c.set('setting', settingRow);
 		await c.env.kv.put(KvConst.SETTING, JSON.stringify(settingRow));
 	},
@@ -62,6 +78,10 @@ const settingService = {
 
 		setting.emailPrefixFilter = setting.emailPrefixFilter.split(",").filter(Boolean);
 
+		setting.resendTokens = toJsonObject(setting.resendTokens);
+		setting.sendkitTokens = toJsonObject(setting.sendkitTokens);
+		setting.sendProviders = toJsonObject(setting.sendProviders);
+
 		c.set?.('setting', setting);
 		return setting;
 	},
@@ -83,6 +103,12 @@ const settingService = {
 		Object.keys(settingRow.resendTokens).forEach(key => {
 			settingRow.resendTokens[key] = `${settingRow.resendTokens[key].slice(0, 12)}******`;
 		});
+
+		Object.keys(settingRow.sendkitTokens).forEach(key => {
+			settingRow.sendkitTokens[key] = `${settingRow.sendkitTokens[key].slice(0, 12)}******`;
+		});
+
+		settingRow.sendkitWebhookSecret = settingRow.sendkitWebhookSecret ? `${settingRow.sendkitWebhookSecret.slice(0, 6)}******` : null;
 
 		settingRow.s3AccessKey = settingRow.s3AccessKey ? `${settingRow.s3AccessKey.slice(0, 12)}******` : null;
 		settingRow.s3SecretKey = settingRow.s3SecretKey ? `${settingRow.s3SecretKey.slice(0, 12)}******` : null;
@@ -130,6 +156,22 @@ const settingService = {
 		}
 
 		params.resendTokens = JSON.stringify(resendTokens);
+
+		if (params.sendkitTokens) {
+			const sendkitTokens = { ...settingData.sendkitTokens, ...params.sendkitTokens };
+			Object.keys(sendkitTokens).forEach(domain => {
+				if (!sendkitTokens[domain]) delete sendkitTokens[domain];
+			});
+			params.sendkitTokens = JSON.stringify(sendkitTokens);
+		}
+
+		if (params.sendProviders) {
+			const sendProviders = { ...settingData.sendProviders, ...params.sendProviders };
+			Object.keys(sendProviders).forEach(domain => {
+				if (!sendProviders[domain]) delete sendProviders[domain];
+			});
+			params.sendProviders = JSON.stringify(sendProviders);
+		}
 
 		await orm(c).update(setting).set({ ...params }).returning().get();
 		await this.refresh(c);

@@ -24,6 +24,8 @@ const en = {
 	senderAccountNotExist: 'Sender email does not exist',
 	noResendToken: 'Resend API token not configured',
 	noSendProvider: 'Email sending service is not configured',
+	sendkitRecipientLimit: 'SendKit supports at most 50 recipients per request',
+	sendkitWebhookSecretMissing: 'SendKit webhook secret is not configured',
 	sendEmailNotCurUser: 'Sender email does not belong to current user',
 	notExistEmailReply: 'Mail does not exist and cannot be replied to',
 	imageAttLimit: 'The maximum number of image attachments is 10',

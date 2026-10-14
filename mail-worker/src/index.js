@@ -21,6 +21,11 @@ export default {
 			 return await kvObjService.toObjResp( { env }, url.pathname.substring(1));
 		 }
 
+		// 外部 provider（SendKit）的 webhook 走根路径 /webhooks/...，直接交给 API 应用
+		if (url.pathname.startsWith('/webhooks/')) {
+			return app.fetch(req, env, ctx);
+		}
+
 		return env.assets.fetch(req);
 	},
 	email: email,

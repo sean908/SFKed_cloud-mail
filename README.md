@@ -52,7 +52,7 @@
 
 - **💻 响应式设计**：响应式布局自动适配PC和大部分手机端浏览器
 
-- **📧 邮件发送**：集成Resend发送邮件，支持群发，内嵌图片和附件发送，发送状态查看
+- **📧 邮件发送**：支持 Cloudflare / Resend / SendKit 多 provider 发信，按发件域选择，支持群发、内嵌图片和附件发送，发送状态查看
 
 - **🛡️ 管理员功能**：可以对用户，邮件进行管理，RABC权限控制对功能及使用资源限制
 
@@ -86,13 +86,31 @@
 
 - **UI框架**：[Element Plus](https://element-plus.org/) 
 
-- **邮件推送：** [Resend](https://resend.com/)
+- **邮件推送：** [Resend](https://resend.com/)、[SendKit](https://sendkit.dev/)
 
 - **缓存**：[Cloudflare KV](https://developers.cloudflare.com/kv/)
 
 - **数据库**：[Cloudflare D1](https://developers.cloudflare.com/d1/)
 
 - **文件存储**：[Cloudflare R2](https://developers.cloudflare.com/r2/)
+
+## 邮件发送服务（多 provider）
+
+支持按发件域选择发信服务，管理员可在「系统设置 → 发信服务」中配置：
+
+- **Cloudflare Email**：绑定 `send_email` 后默认优先使用，无需 API Key。
+- **Resend**：为指定域配置 Resend API Token。
+- **SendKit**：为指定域配置 SendKit API Key。
+
+未显式选择时按 Cloudflare → Resend → SendKit 的顺序自动选择；目标 provider 缺少凭据时会直接报错，不会自动切换到其它 provider，避免重复发送。
+
+### SendKit 接入说明
+
+- 前置条件：需先在 SendKit 账户中完成发件域名的 DNS 验证。官方文档对子域名支持存在冲突描述，**二级域名能否发送必须以目标账户的实际验证结果为准**。
+- API Key：在「系统设置 → 发信服务」中按域保存，仅以脱敏值回显，不写入前端 bundle、日志或错误响应。
+- Webhook：在 SendKit Dashboard 中配置 HTTPS 回调地址 `/webhooks/sendkit`，并填写 Webhook 签名密钥（HMAC-SHA256，请求头 `X-Webhook-Signature`）。
+- 内嵌图片：SendKit 走 R2 公网 URL（需已配置 R2 与访问域名），普通附件以 Base64 发送；单次最多 50 个收件人、10 个附件。
+- 无需新增 Wrangler binding，也无需引入 `@sendkitdev/sdk` 依赖。
 
 ## 目录结构
 
