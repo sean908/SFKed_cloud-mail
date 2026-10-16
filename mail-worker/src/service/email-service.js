@@ -23,6 +23,10 @@ import domainUtils from '../utils/domain-uitls';
 import account from "../entity/account";
 import { att } from '../entity/att';
 import telegramService from './telegram-service';
+import brevoService from './brevo-service';
+import providerResolver from './provider-resolver';
+import providerMessageService from './provider-message-service';
+import { providerConst } from '../const/entity-const';
 
 const emailService = {
 
@@ -261,7 +265,7 @@ const emailService = {
 			attachments = [] //附件
 		} = params;
 
-		const { resendTokens, r2Domain, send, domainList } = await settingService.query(c);
+		const { resendTokens, brevoTokens, providerMap, r2Domain, send, domainList } = await settingService.query(c);
 
 		let { imageDataList, html } = await attService.toImageUrlHtml(c, content);
 
@@ -327,12 +331,36 @@ const emailService = {
 		}
 
 		const domain = emailUtils.getDomain(accountRow.email);
-		const resendToken = resendTokens[domain];
 		const useCloudflareEmail = !!c.env.email;
 
-		//如果接收方存在站外邮箱，又没有发信服务
-		if (!useCloudflareEmail && !resendToken && !allInternal) {
-			throw new BizError(t('noSendProvider'));
+		// Resolve which provider to use for this domain
+		let resolved = null;
+		if (!allInternal) {
+			resolved = providerResolver.resolve(domain, {
+				providerMap, resendTokens, brevoTokens, useCloudflareEmail
+			});
+
+			// If no provider available
+			if (!resolved.provider) {
+				throw new BizError(t('noSendProvider'));
+			}
+
+			// Brevo phase-1 limitations: reject attachments, inline images, reply, thread headers
+			if (resolved.provider === providerConst.BREVO) {
+				if (imageDataList.length > 0) {
+					throw new BizError(t('brevoNotSupportInline'));
+				}
+				if (attachments.length > 0) {
+					throw new BizError(t('brevoNotSupportAtt'));
+				}
+				if (sendType === 'reply') {
+					throw new BizError(t('brevoNotSupportReply'));
+				}
+				// Validate at least text or html present
+				if (!text && !html) {
+					throw new BizError(t('emptyEmail'));
+				}
+			}
 		}
 
 		//没有发件人名字自动截取
@@ -357,33 +385,27 @@ const emailService = {
 
 		let sendResult = {};
 
-		//存在站外邮箱时，如果配置了 Cloudflare Email Service 就优先使用，否则使用 Resend
+		//存在站外邮箱时，按 resolver 结果选择 provider
 		if (!allInternal) {
 
-			if (useCloudflareEmail) {
-				sendResult = await this.sendByCloudflareEmail(c, {
-					name,
-					accountEmail: accountRow.email,
-					receiveEmail,
-					subject,
-					text,
-					html,
-					attachments: [...imageDataList, ...attachments],
-					sendType,
-					messageId: emailRow.messageId
-				});
-			} else {
-				sendResult = await this.sendByResend(resendToken, {
-					name,
-					accountEmail: accountRow.email,
-					receiveEmail,
-					subject,
-					text,
-					html,
-					attachments: [...imageDataList, ...attachments],
-					sendType,
-					messageId: emailRow.messageId
-				});
+			const sendParams = {
+				name,
+				accountEmail: accountRow.email,
+				receiveEmail,
+				subject,
+				text,
+				html,
+				attachments: [...imageDataList, ...attachments],
+				sendType,
+				messageId: emailRow.messageId
+			};
+
+			if (resolved.provider === providerConst.CLOUDFLARE) {
+				sendResult = await this.sendByCloudflareEmail(c, sendParams);
+			} else if (resolved.provider === providerConst.RESEND) {
+				sendResult = await this.sendByResend(resolved.apiKey, sendParams);
+			} else if (resolved.provider === providerConst.BREVO) {
+				sendResult = await brevoService.send(resolved.apiKey, sendParams);
 			}
 
 		}
@@ -408,7 +430,14 @@ const emailService = {
 		emailData.content = html;
 		emailData.text = text;
 		emailData.accountId = accountId;
-		emailData.status = useCloudflareEmail ? emailConst.status.DELIVERED : emailConst.status.SENT;
+		// Brevo and Resend → SENT; Cloudflare → DELIVERED
+		if (allInternal) {
+			emailData.status = emailConst.status.SENT;
+		} else if (resolved.provider === providerConst.CLOUDFLARE) {
+			emailData.status = emailConst.status.DELIVERED;
+		} else {
+			emailData.status = emailConst.status.SENT;
+		}
 		emailData.type = emailConst.type.SEND;
 		emailData.userId = userId;
 		emailData.resendEmailId = data?.id;
@@ -433,6 +462,11 @@ const emailService = {
 
 		//保存到数据库并返回结果
 		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
+
+		//保存 provider message 映射（Brevo/Resend 站外邮件）
+		if (!allInternal && resolved.provider === providerConst.BREVO && data?.id) {
+			await providerMessageService.saveMappings(c, emailResult.emailId, providerConst.BREVO, receiveEmail, data.id);
+		}
 
 		//保存内嵌附件
 		if (imageDataList.length > 0) {

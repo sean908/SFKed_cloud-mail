@@ -32,6 +32,7 @@ const dbInit = {
 		await this.v3_1DB(c);
 		await this.v3_2DB(c);
 		await this.v3_3DB(c);
+		await this.v3_4DB(c);
 		await settingService.refresh(c);
 		return c.text('success');
 	},
@@ -54,6 +55,44 @@ const dbInit = {
 				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN webhook_retry INTEGER NOT NULL DEFAULT 0;`),
 				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT '';`)
 			]);
+		} catch (e) {
+			console.warn(`跳过字段：${e.message}`);
+		}
+	},
+
+	async v3_4DB(c) {
+		const addColumn = async (sql) => {
+			try { await c.env.db.prepare(sql).run(); } catch (e) { console.warn(`跳过字段：${e.message}`); }
+		};
+
+		await addColumn(`ALTER TABLE setting ADD COLUMN brevo_tokens TEXT NOT NULL DEFAULT '{}';`);
+		await addColumn(`ALTER TABLE setting ADD COLUMN provider_map TEXT NOT NULL DEFAULT '{}';`);
+
+		try {
+			await c.env.db.prepare(`
+				CREATE TABLE IF NOT EXISTS provider_message (
+					pm_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+					email_id INTEGER NOT NULL,
+					provider TEXT NOT NULL,
+					provider_message_id TEXT NOT NULL,
+					recipient TEXT NOT NULL,
+					status INTEGER NOT NULL DEFAULT 0,
+					message TEXT,
+					event_time TEXT,
+					create_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+				)
+			`).run();
+		} catch (e) {
+			console.warn(`跳过表创建：${e.message}`);
+		}
+
+		try {
+			await c.env.db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_provider_msg_recipient ON provider_message(provider, provider_message_id, recipient)`).run();
+		} catch (e) {
+			console.warn(`跳过索引：${e.message}`);
+		}
+	},
+
 		} catch (e) {
 			console.warn(`跳过字段：${e.message}`);
 		}

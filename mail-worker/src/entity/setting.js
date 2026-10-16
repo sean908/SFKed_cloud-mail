@@ -67,6 +67,8 @@ export const setting = sqliteTable('setting', {
 	webhookUrl: text('webhook_url').default('').notNull(),
 	webhookStatus: integer('webhook_status').default(1).notNull(),
 	webhookRetry: integer('webhook_retry').default(0).notNull(),
-	webhookSecret: text('webhook_secret').default('').notNull()
+	webhookSecret: text('webhook_secret').default('').notNull(),
+	brevoTokens: text('brevo_tokens').default("{}").notNull(),
+	providerMap: text('provider_map').default("{}").notNull()
 });
 export default setting
