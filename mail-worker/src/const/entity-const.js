@@ -154,15 +154,6 @@ export const providerConst = {
 	BREVO: 'brevo'
 }
 
-export const providerMessageStatus = {
-	SENT: 1,
-	DELIVERED: 2,
-	BOUNCED: 3,
-	COMPLAINED: 4,
-	DELAYED: 5,
-	FAILED: 8
-}
-
 export const verifyRecordType = {
 	REG: 0,
 	ADD: 1,

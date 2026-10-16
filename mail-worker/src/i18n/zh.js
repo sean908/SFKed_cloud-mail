@@ -69,7 +69,6 @@ const zh = {
 	emailExistDatabase: '有邮箱已存在数据库中',
 	notConfigOss: '对象存储未配置',
 	brevoApiKey: 'Brevo API key 未配置',
-	noBrevoToken: 'Brevo未配置，只能给站内邮箱发件',
 	brevoNotSupportAtt: '当前阶段Brevo不支持附件',
 	brevoNotSupportReply: '当前阶段Brevo不支持回复邮件',
 	brevoNotSupportInline: '当前阶段Brevo不支持内嵌图片',
@@ -78,9 +77,6 @@ const zh = {
 	brevoIdCountMismatch: 'Brevo返回的消息ID数量与收件人数量不匹配',
 	providerConfigError: 'Provider配置错误',
 	unknownProvider: '未知的发信provider',
-	providerMessageNotFound: '未找到Provider消息记录',
-	webhookAuthFail: 'Webhook认证失败',
-	webhookEventIgnored: 'Webhook事件已忽略',
 	perms: {
 		"邮件": "邮件",
 		"邮件发送": "邮件发送",

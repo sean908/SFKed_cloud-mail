@@ -189,18 +189,16 @@
                 </div>
               </div>
               <div class="setting-item">
-                <div><span>{{ setting.hasCfEmail ? $t('cloudflareEmailSending') : $t('resendToken') }}</span></div>
-                <div v-if="setting.hasCfEmail">
-                  <span>{{ $t('enabled') }}</span>
+                <div>
+                  <span>{{ $t('sendSetting') }}</span>
+                  <el-tooltip effect="dark" :content="$t('sendSettingDesc')">
+                    <Icon class="warning" icon="fe:warning" width="18" height="18"/>
+                  </el-tooltip>
                 </div>
-                <div v-else>
-                  <el-button class="opt-button" style="margin-top: 0" @click="openResendList" size="small"
+                <div class="forward">
+                  <el-button class="opt-button" style="margin-top: 0" @click="openSendSetting" size="small"
                              type="primary">
-                    <Icon icon="ic:round-list" width="18" height="18"/>
-                  </el-button>
-                  <el-button class="opt-button" style="margin-top: 0" @click="openResendForm" size="small"
-                             type="primary">
-                    <Icon icon="material-symbols:add-rounded" width="16" height="16"/>
+                    <Icon icon="fluent:settings-48-regular" width="18" height="18"/>
                   </el-button>
                 </div>
               </div>
@@ -502,19 +500,71 @@
           <el-button type="primary" :loading="settingLoading" @click="saveTitle">{{ $t('save') }}</el-button>
         </form>
       </el-dialog>
-      <el-dialog v-model="resendTokenFormShow" :title="$t('resendToken')" width="340" @closed="cleanResendTokenForm">
-        <form @submit.prevent>
-          <el-select style="margin-bottom: 15px" v-model="resendTokenForm.domain" placeholder="Select">
-            <el-option
-                v-for="item in settingStore.domainList"
-                :key="item"
-                :label="item"
-                :value="item"
-            />
-          </el-select>
-          <el-input type="text" :placeholder="$t('addResendTokenDesc')" v-model="resendTokenForm.token" @keyup.enter="saveResendToken"/>
-          <el-button type="primary" :loading="settingLoading" @click="saveResendToken">{{ $t('save') }}</el-button>
-        </form>
+      <el-dialog v-model="sendSettingShow" :title="$t('sendSetting')" class="forward-dialog" @closed="resetSendForm">
+        <div class="send-setting-list">
+          <div class="send-domain">
+            <div class="send-domain-head">
+              <span class="send-domain-name">{{ $t('brevoWebhookSecret') }}</span>
+            </div>
+            <div class="send-domain-body">
+              <div class="send-key-row">
+                <span class="key-state" :class="{ set: setting.brevoWebhookSecret }">
+                  {{ setting.brevoWebhookSecret ? $t('credentialSet', { value: setting.brevoWebhookSecret }) : $t('credentialNotSet') }}
+                </span>
+                <el-button v-if="setting.brevoWebhookSecret" link type="danger" size="small" @click="clearBrevoWebhookSecret">
+                  {{ $t('clear') }}
+                </el-button>
+              </div>
+              <el-input type="text" :placeholder="$t('tokenLeaveEmpty')" v-model="brevoWebhookSecretInput"/>
+              <span class="send-hint">{{ $t('brevoWebhookHeaderHint') }}</span>
+            </div>
+          </div>
+          <div class="send-domain" v-for="item in sendDomains" :key="item.domain">
+            <div class="send-domain-head">
+              <span class="send-domain-name">{{ item.label }}</span>
+              <el-select :style="`width: ${locale === 'en' ? 130 : 116}px;`" v-model="sendForm[item.domain].provider">
+                <el-option :label="$t('providerDefault')" value="default"/>
+                <el-option :label="$t('providerCloudflare')" value="cloudflare"/>
+                <el-option :label="$t('providerResend')" value="resend"/>
+                <el-option :label="$t('providerBrevo')" value="brevo"/>
+              </el-select>
+            </div>
+            <div v-if="sendForm[item.domain].provider === 'cloudflare'" class="send-domain-body">
+              <span class="send-hint" :class="setting.hasCfEmail ? 'ok' : 'error'">
+                {{ setting.hasCfEmail ? $t('cloudflareBindingReady') : $t('cloudflareBindingMissing') }}
+              </span>
+            </div>
+            <div v-if="sendForm[item.domain].provider === 'resend'" class="send-domain-body">
+              <div class="send-key-row">
+                <span class="key-state" :class="{ set: item.maskResend }">
+                  {{ item.maskResend ? $t('credentialSet', { value: item.maskResend }) : $t('credentialNotSet') }}
+                </span>
+                <el-button v-if="item.maskResend" link type="danger" size="small" @click="clearCredential(item.domain, 'resend')">
+                  {{ $t('clear') }}
+                </el-button>
+              </div>
+              <el-input type="text" :placeholder="$t('tokenLeaveEmpty')" v-model="sendForm[item.domain].resendKey"/>
+            </div>
+            <div v-if="sendForm[item.domain].provider === 'brevo'" class="send-domain-body">
+              <div class="send-key-row">
+                <span class="key-state" :class="{ set: item.maskBrevo }">
+                  {{ item.maskBrevo ? $t('credentialSet', { value: item.maskBrevo }) : $t('credentialNotSet') }}
+                </span>
+                <el-button v-if="item.maskBrevo" link type="danger" size="small" @click="clearCredential(item.domain, 'brevo')">
+                  {{ $t('clear') }}
+                </el-button>
+              </div>
+              <el-input type="text" :placeholder="$t('tokenLeaveEmpty')" v-model="sendForm[item.domain].brevoKey"/>
+              <span v-if="!item.maskBrevo && !sendForm[item.domain].brevoKey" class="send-hint error">
+                {{ $t('brevoKeyMissing') }}
+              </span>
+              <span class="send-hint">{{ $t('brevoPhaseOneHint') }}</span>
+            </div>
+          </div>
+        </div>
+        <template #footer>
+          <el-button :loading="settingLoading" type="primary" @click="saveSendSetting">{{ $t('save') }}</el-button>
+        </template>
       </el-dialog>
       <el-dialog v-model="r2DomainShow" :title="$t('addOsDomain')" width="340"
                  @closed="r2DomainInput = setting.r2Domain">
@@ -738,14 +788,6 @@ Authorization: &lt;secret&gt;</pre>
           </div>
         </template>
       </el-dialog>
-      <el-dialog class="resend-table" v-model="showResendList" :title="$t('resendTokenList')">
-        <el-table :data="resendList">
-          <el-table-column :min-width="emailColumnWidth" property="key" :label="$t('domain')"
-                           :show-overflow-tooltip="true"/>
-          <el-table-column :width="tokenColumnWidth" property="value" label="Token" fixed="right"
-                           :show-overflow-tooltip="true"/>
-        </el-table>
-      </el-dialog>
       <el-dialog v-model="regVerifyCountShow" :title="$t('rulesVerifyTitle',{count: regVerifyCount})"
                  @closed="regVerifyCount = setting.regVerifyCount">
         <form @submit.prevent>
@@ -944,7 +986,6 @@ import {storeToRefs} from "pinia";
 import {debounce} from 'lodash-es'
 import {isDomain, isEmail, isIpUrl} from "@/utils/verify-utils.js";
 import loading from "@/components/loading/index.vue";
-import {getTextWidth} from "@/utils/text.js";
 import {fileToBase64} from "@/utils/file-utils.js"
 import {useI18n} from 'vue-i18n';
 import axios from "axios";
@@ -964,7 +1005,6 @@ const localUpShow = ref(false)
 const accountStore = useAccountStore();
 const userStore = useUserStore();
 const editTitleShow = ref(false)
-const resendTokenFormShow = ref(false)
 const blackFormShow = ref(false)
 const autoCleanShow = ref(false)
 const aiCodeFilterShow = ref(false)
@@ -976,7 +1016,10 @@ const thirdEmailShow = ref(false)
 const webhookShow = ref(false)
 const forwardRulesShow = ref(false)
 const emailPrefixShow = ref(false)
-const showResendList = ref(false)
+const sendSettingShow = ref(false)
+const sendForm = reactive({})
+const brevoWebhookSecretInput = ref('')
+const clearBrevoWebhookSecretFlag = ref(false)
 const settingStore = useSettingStore();
 const uiStore = useUiStore();
 const {settings: setting} = storeToRefs(settingStore);
@@ -998,10 +1041,6 @@ let backup = '{}'
 const addS3Show = ref(false)
 const addVerifyCountShow = ref(false)
 const regVerifyCountShow = ref(false)
-const resendTokenForm = reactive({
-  domain: '',
-  token: '',
-})
 const turnstileForm = reactive({
   siteKey: '',
   secretKey: ''
@@ -1086,8 +1125,6 @@ const webhookPayloadExample = `{
   "code": "123456",
   "createTime": "2099-12-30 23:59:59"
 }`
-const emailColumnWidth = ref(0)
-const tokenColumnWidth = ref(0)
 const ruleType = ref(0)
 const ruleEmail = ref([])
 const tgMsgFrom = ref('')
@@ -1107,7 +1144,7 @@ function getSettings() {
   settingQuery().then(settingData => {
     setting.value = settingData
     settingStore.domainList = settingData.domainList;
-    resendTokenForm.domain = setting.value.domainList[0]
+    resetSendForm()
     loginOpacity.value = setting.value.loginOpacity
     minEmailPrefix.value = setting.value.minEmailPrefix
     firstLoading.value = false
@@ -1151,28 +1188,6 @@ function resetAddS3Form() {
   s3.forcePathStyle = setting.value.forcePathStyle
 }
 
-const resendList = computed(() => {
-
-  let list = Object.keys(setting.value.resendTokens).map(key => {
-    return {
-      key: key,
-      value: setting.value.resendTokens[key]
-    };
-  })
-
-  if (list.length > 0) {
-
-    const key = list.reduce((a, b) => compareByLengthAndUpperCase(a, b, 'key')).key;
-    emailColumnWidth.value = getTextWidth(key) + 30;
-
-    const value = list.reduce((a, b) => compareByLengthAndUpperCase(a, b, 'value')).value;
-    tokenColumnWidth.value = getTextWidth(value) + 30;
-
-  }
-
-  return list;
-});
-
 function getUpdate() {
   if (getUpdateErrorCount > 5 || !getUpdateErrorCount) return
   axios.get('https://api.github.com/repos/maillab/cloud-mail/releases/latest').then(({data}) => {
@@ -1201,15 +1216,6 @@ function saveRegVerifyCount() {
   editSetting({regVerifyCount: regVerifyCount.value})
 }
 
-const compareByLengthAndUpperCase = (a, b, key) => {
-  const getUpperCaseCount = (str) => (str.match(/[A-Z]/g) || []).length;
-  if (a[key].length === b[key].length) {
-    return getUpperCaseCount(a[key]) > getUpperCaseCount(b[key]) ? a : b;
-  }
-  return a[key].length > b[key].length ? a : b;
-};
-
-
 function closedSetBackground() {
   backgroundImage.value = ''
   localUpShow.value = false
@@ -1233,10 +1239,6 @@ function openTgSetting() {
 
 function openNoticePopupSetting() {
   noticePopupShow.value = true
-}
-
-function openResendList() {
-  showResendList.value = true
 }
 
 function resetNoticeForm() {
@@ -1278,6 +1280,124 @@ function openWebhookSetting() {
   webhookSecret.value = setting.value.webhookSecret || ''
   webhookShow.value = true
 }
+
+function openSendSetting() {
+  resetSendForm()
+  sendSettingShow.value = true
+}
+
+function resetBrevoWebhookSecretForm() {
+  brevoWebhookSecretInput.value = ''
+  clearBrevoWebhookSecretFlag.value = false
+}
+
+function clearBrevoWebhookSecret() {
+  clearBrevoWebhookSecretFlag.value = true
+  brevoWebhookSecretInput.value = ''
+}
+
+function bareDomain(domain) {
+  return domain.startsWith('@') ? domain.slice(1) : domain
+}
+
+function resetSendForm() {
+  const domains = (setting.value.domainList || []).map(bareDomain)
+  const next = {}
+  domains.forEach(domain => {
+    next[domain] = {
+      provider: setting.value.providerMap?.[domain] || 'default',
+      brevoKey: '',
+      resendKey: '',
+      clearBrevo: false,
+      clearResend: false,
+    }
+  })
+  Object.keys(sendForm).forEach(k => delete sendForm[k])
+  Object.assign(sendForm, next)
+  resetBrevoWebhookSecretForm()
+}
+
+function clearCredential(domain, provider) {
+  const form = sendForm[domain]
+  if (!form) return
+  if (provider === 'brevo') {
+    form.clearBrevo = true
+    form.brevoKey = ''
+  } else if (provider === 'resend') {
+    form.clearResend = true
+    form.resendKey = ''
+  }
+}
+
+function saveSendSetting() {
+
+  const providerMap = {}
+  const brevoTokens = {}
+  const resendTokens = {}
+  let hasBrevo = false
+  let hasResend = false
+  let missingBrevo = null
+
+  Object.keys(sendForm).forEach(domain => {
+
+    const form = sendForm[domain]
+
+    // Empty value signals "fall back to the default provider order".
+    providerMap[domain] = form.provider && form.provider !== 'default' ? form.provider : ''
+
+    // An empty input leaves the stored key untouched; only an explicit clear removes it.
+    if (form.brevoKey) {
+      brevoTokens[domain] = form.brevoKey
+      hasBrevo = true
+    } else if (form.clearBrevo) {
+      brevoTokens[domain] = ''
+      hasBrevo = true
+    }
+
+    if (form.resendKey) {
+      resendTokens[domain] = form.resendKey
+      hasResend = true
+    } else if (form.clearResend) {
+      resendTokens[domain] = ''
+      hasResend = true
+    }
+
+    // Selecting Brevo requires a key; never silently fall back to another provider.
+    if (form.provider === 'brevo') {
+      const willHaveKey = !!form.brevoKey || (!!setting.value.brevoTokens?.[domain] && !form.clearBrevo)
+      if (!willHaveKey) missingBrevo = domain
+    }
+  })
+
+  if (missingBrevo) {
+    ElMessage({
+      message: t('brevoKeyMissing'),
+      type: 'warning',
+      plain: true
+    })
+    return
+  }
+
+  const settingForm = { providerMap }
+  if (hasBrevo) settingForm.brevoTokens = brevoTokens
+  if (hasResend) settingForm.resendTokens = resendTokens
+  if (brevoWebhookSecretInput.value) {
+    settingForm.brevoWebhookSecret = brevoWebhookSecretInput.value
+  } else if (clearBrevoWebhookSecretFlag.value) {
+    settingForm.brevoWebhookSecret = ''
+  }
+  editSetting(settingForm)
+}
+
+const sendDomains = computed(() => (setting.value.domainList || []).map(item => {
+  const domain = bareDomain(item)
+  return {
+    domain,
+    label: item,
+    maskBrevo: setting.value.brevoTokens?.[domain],
+    maskResend: setting.value.resendTokens?.[domain],
+  }
+}))
 
 function openEmailPrefix() {
   emailPrefixShow.value = true
@@ -1644,10 +1764,6 @@ function saveR2domain() {
   editSetting(settingForm)
 }
 
-function openResendForm() {
-  resendTokenFormShow.value = true
-}
-
 function openBlackListForm() {
   blackFormShow.value = true
 }
@@ -1656,25 +1772,8 @@ function openAiCodeFilter() {
   aiCodeFilterShow.value = true
 }
 
-function saveResendToken() {
-  const settingForm = {
-    resendTokens: {}
-  }
-  const domain = resendTokenForm.domain.slice(1)
-  settingForm.resendTokens[domain] = resendTokenForm.token
-  editSetting(settingForm)
-}
-
 function backupSetting() {
-  const settingForm = {...setting.value}
-  delete settingForm.resendTokens
-  delete settingForm.siteKey
-  delete settingForm.secretKey
   backup = JSON.stringify(setting.value)
-}
-
-function cleanResendTokenForm() {
-  resendTokenForm.token = ''
 }
 
 function beforeChange() {
@@ -1692,6 +1791,10 @@ function change(e) {
   delete settingForm.s3SecretKey
   delete settingForm.tgBotToken
   delete settingForm.resendTokens
+  // These come back masked from the server; echoing them would overwrite the real secrets.
+  delete settingForm.brevoTokens
+  delete settingForm.brevoWebhookSecret
+  delete settingForm.providerMap
   editSetting(settingForm, false)
 }
 
@@ -1731,7 +1834,7 @@ function editSetting(settingForm, refreshStatus = true) {
     }
     editTitleShow.value = false
     r2DomainShow.value = false
-    resendTokenFormShow.value = false
+    sendSettingShow.value = false
     turnstileShow.value = false
     tgSettingShow.value = false
     thirdEmailShow.value = false
@@ -1991,16 +2094,6 @@ function editSetting(settingForm, refreshStatus = true) {
   }
 }
 
-:deep(.resend-table.el-dialog) {
-  min-height: 300px;
-  width: 500px !important;
-  @media (max-width: 540px) {
-    width: calc(100% - 40px) !important;
-    margin-right: 20px !important;
-    margin-left: 20px !important;
-  }
-}
-
 :deep(.notice-popup.el-dialog) {
   min-height: 300px;
   width: 820px !important;
@@ -2009,10 +2102,6 @@ function editSetting(settingForm, refreshStatus = true) {
     margin-right: 20px !important;
     margin-left: 20px !important;
   }
-}
-
-:deep(.resend-table .el-dialog__header) {
-  padding-bottom: 5px;
 }
 
 :deep(.el-table__inner-wrapper:before) {
@@ -2089,6 +2178,73 @@ function editSetting(settingForm, refreshStatus = true) {
     width: 48px;
     margin: 0 0 0 10px;
   }
+}
+
+.send-setting-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.send-domain {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.send-domain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.send-domain-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.send-domain-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.send-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.key-state {
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-state.set {
+  color: var(--el-color-success);
+}
+
+.send-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.send-hint.error {
+  color: var(--el-color-danger);
+}
+
+.send-hint.ok {
+  color: var(--el-color-success);
 }
 
 .forward-set-body {

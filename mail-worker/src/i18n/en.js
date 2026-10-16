@@ -69,7 +69,6 @@ const en = {
 	emailExistDatabase: 'Email already exists in the database',
 	notConfigOss: 'Object storage not configured',
 	brevoApiKey: 'Brevo API key not configured',
-	noBrevoToken: 'Brevo API key not configured, only internal emails can be sent',
 	brevoNotSupportAtt: 'Brevo does not support attachments in this phase',
 	brevoNotSupportReply: 'Brevo does not support reply emails in this phase',
 	brevoNotSupportInline: 'Brevo does not support inline images in this phase',
@@ -78,9 +77,6 @@ const en = {
 	brevoIdCountMismatch: 'Brevo returned message ID count does not match recipient count',
 	providerConfigError: 'Provider configuration error',
 	unknownProvider: 'Unknown provider specified',
-	providerMessageNotFound: 'Provider message not found',
-	webhookAuthFail: 'Webhook authentication failed',
-	webhookEventIgnored: 'Webhook event ignored',
 	perms: {
 		"邮件": "Emails",
 		"邮件发送": "Send Email",

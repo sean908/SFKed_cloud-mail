@@ -417,6 +417,17 @@ const emailService = {
 			throw new BizError(error.message);
 		}
 
+		// Brevo returns one id (shared by all recipients) or one id per recipient.
+		// Validate the shape before persisting so a mismatch never leaves a
+		// half-written record behind.
+		let brevoMessageIds = null;
+		if (!allInternal && resolved?.provider === providerConst.BREVO && data?.id) {
+			brevoMessageIds = Array.isArray(data.id) ? data.id : [data.id];
+			if (brevoMessageIds.length > 1 && brevoMessageIds.length !== receiveEmail.length) {
+				throw new BizError(t('brevoIdCountMismatch'));
+			}
+		}
+
 		imageDataList = imageDataList.map(item => ({...item, contentId: `<${item.contentId}>`}))
 
 		//把图片标签cid标签切换会通用url
@@ -430,17 +441,15 @@ const emailService = {
 		emailData.content = html;
 		emailData.text = text;
 		emailData.accountId = accountId;
-		// Brevo and Resend → SENT; Cloudflare → DELIVERED
-		if (allInternal) {
-			emailData.status = emailConst.status.SENT;
-		} else if (resolved.provider === providerConst.CLOUDFLARE) {
-			emailData.status = emailConst.status.DELIVERED;
-		} else {
-			emailData.status = emailConst.status.SENT;
-		}
+		// Cloudflare accepts synchronously → DELIVERED; Resend/Brevo → SENT.
+		emailData.status = (!allInternal && resolved.provider === providerConst.CLOUDFLARE)
+			? emailConst.status.DELIVERED
+			: emailConst.status.SENT;
 		emailData.type = emailConst.type.SEND;
 		emailData.userId = userId;
-		emailData.resendEmailId = data?.id;
+		// resend_email_id is a single-id column: Brevo's per-recipient ids live in
+		// provider_message instead, so only a scalar id is stored here.
+		emailData.resendEmailId = typeof data?.id === 'string' ? data.id : null;
 
 		const recipient = [];
 
@@ -464,8 +473,8 @@ const emailService = {
 		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
 
 		//保存 provider message 映射（Brevo/Resend 站外邮件）
-		if (!allInternal && resolved.provider === providerConst.BREVO && data?.id) {
-			await providerMessageService.saveMappings(c, emailResult.emailId, providerConst.BREVO, receiveEmail, data.id);
+		if (brevoMessageIds) {
+			await providerMessageService.saveMappings(c, emailResult.emailId, providerConst.BREVO, receiveEmail, brevoMessageIds);
 		}
 
 		//保存内嵌附件
