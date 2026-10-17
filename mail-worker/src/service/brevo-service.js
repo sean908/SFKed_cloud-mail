@@ -1,12 +1,20 @@
 import { t } from '../i18n/i18n'
 import BizError from '../error/biz-error';
+import { normalizeAttachments } from '../utils/attachment-utils';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
+export const BREVO_ATTACHMENT_LIMIT = 10;
+export const BREVO_REQUEST_SIZE_LIMIT = 4 * 1024 * 1024;
 
 const brevoService = {
 
-	// Send email via Brevo HTTP API (no SDK)
-	async send(apiKey, params) {
+	prepareRequest(params) {
+		const attachments = params.attachments || [];
+		if (attachments.length > BREVO_ATTACHMENT_LIMIT) {
+			throw new BizError(t('brevoAttachmentLimit'));
+		}
+
+		const normalizedAttachments = normalizeAttachments(attachments);
 		const body = {
 			sender: { name: params.name, email: params.accountEmail },
 			to: params.receiveEmail.map(email => ({ email })),
@@ -19,7 +27,26 @@ const brevoService = {
 		if (params.html) {
 			body.htmlContent = params.html;
 		}
+		if (normalizedAttachments.length > 0) {
+			body.attachment = normalizedAttachments.map(attachment => ({
+				name: attachment.filename,
+				content: attachment.content,
+			}));
+		}
 
+		const serializedBody = JSON.stringify(body);
+		if (new TextEncoder().encode(serializedBody).byteLength > BREVO_REQUEST_SIZE_LIMIT) {
+			throw new BizError(t('brevoAttachmentTooLarge'));
+		}
+
+		return {
+			serializedBody,
+			attachments: normalizedAttachments,
+		};
+	},
+
+	async send(apiKey, params) {
+		const prepared = this.prepareRequest(params);
 		let response;
 		try {
 			response = await fetch(BREVO_API_URL, {
@@ -29,7 +56,7 @@ const brevoService = {
 					'Content-Type': 'application/json',
 					'Accept': 'application/json'
 				},
-				body: JSON.stringify(body)
+				body: prepared.serializedBody
 			});
 		} catch (e) {
 			// Network error — do not retry, do not switch provider
@@ -65,17 +92,23 @@ const brevoService = {
 		// Brevo returns messageId as a string for single recipient,
 		// or an array of strings for multiple recipients
 		const messageId = result.messageId;
+		const messageIds = Array.isArray(messageId) ? messageId : [messageId];
 
-		if (!messageId) {
+		if (
+			messageIds.length === 0
+			|| messageIds.some(id => typeof id !== 'string' || !id.trim())
+		) {
 			return {
 				data: null,
-				error: { message: t('brevoResponseError') }
+				error: { message: t('brevoResponseError') },
+				attachments: prepared.attachments,
 			};
 		}
 
 		return {
 			data: { id: messageId },
-			error: null
+			error: null,
+			attachments: prepared.attachments,
 		};
 	}
 };

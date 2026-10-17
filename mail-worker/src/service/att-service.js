@@ -10,6 +10,18 @@ import { v4 as uuidv4 } from 'uuid';
 import domainUtils from '../utils/domain-uitls';
 import settingService from "./setting-service";
 
+export async function buildNormalizedAttachmentKey(attachment) {
+	const contentHash = await fileUtils.getBuffHash(attachment.bytes);
+	const metadataHash = await fileUtils.getBuffHash(
+		new TextEncoder().encode(`${attachment.filename}\u0000${attachment.contentType || ''}`)
+	);
+	return constant.ATTACHMENT_PREFIX
+		+ contentHash
+		+ '-'
+		+ metadataHash
+		+ fileUtils.getExtFileName(attachment.filename);
+}
+
 const attService = {
 
 	async addAtt(c, attachments) {
@@ -149,25 +161,41 @@ const attService = {
 	async saveSendAtt(c, attList, userId, accountId, emailId) {
 
 		const attDataList = [];
+		const pendingObjects = [];
+		const normalizedKeys = new Set();
 
 		for (let att of attList) {
-			att.buff = fileUtils.base64ToUint8Array(att.content);
-			att.key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(att.buff) + fileUtils.getExtFileName(att.filename);
+			const isNormalized = att.normalized === true && att.bytes instanceof Uint8Array;
+			att.buff = isNormalized ? att.bytes : fileUtils.base64ToUint8Array(att.content);
+			att.key = isNormalized
+				? await buildNormalizedAttachmentKey(att)
+				: constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(att.buff) + fileUtils.getExtFileName(att.filename);
 			const attData = { userId, accountId, emailId };
 			attData.key = att.key;
 			attData.size = att.buff.length;
 			attData.filename = att.filename;
-			attData.mimeType = att.type;
+			attData.mimeType = isNormalized
+				? att.contentType || 'application/octet-stream'
+				: att.type;
 			attData.type = attConst.type.ATT;
 			attDataList.push(attData);
+			if (!isNormalized || !normalizedKeys.has(att.key)) {
+				pendingObjects.push({
+					key: att.key,
+					content: att.buff,
+					mimeType: attData.mimeType,
+					filename: att.filename,
+				});
+				normalizedKeys.add(att.key);
+			}
 		}
 
 		await orm(c).insert(att).values(attDataList).run();
 
-		for (let att of attList) {
-			await r2Service.putObj(c, att.key, att.buff, {
-				contentType: att.type,
-				contentDisposition: `attachment;filename=${att.filename}`
+		for (const object of pendingObjects) {
+			await r2Service.putObj(c, object.key, object.content, {
+				contentType: object.mimeType,
+				contentDisposition: `attachment;filename=${object.filename}`
 			});
 		}
 
@@ -201,6 +229,31 @@ const attService = {
 
 	async removeByEmailIds(c, emailIds) {
 		await this.removeAttByField(c, 'email_id', emailIds);
+	},
+
+	async removeByEmailIdWithExclusiveKeys(c, emailId, extraKeys = []) {
+		const rows = await orm(c)
+			.select({ key: att.key })
+			.from(att)
+			.where(eq(att.emailId, emailId))
+			.all();
+		const keys = [...new Set([...rows.map(row => row.key), ...extraKeys].filter(Boolean))];
+
+		await orm(c).delete(att).where(eq(att.emailId, emailId)).run();
+
+		if (keys.length === 0) {
+			return;
+		}
+
+		const remaining = await orm(c)
+			.select({ key: att.key })
+			.from(att)
+			.where(inArray(att.key, keys))
+			.all();
+		const remainingKeys = new Set(remaining.map(row => row.key));
+		const exclusiveKeys = keys.filter(key => !remainingKeys.has(key));
+
+		await this.batchDelete(c, exclusiveKeys);
 	},
 
 	selectByEmailIds(c, emailIds) {

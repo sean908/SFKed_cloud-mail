@@ -39,6 +39,10 @@ const providerMessageService = {
 		return orm(c).select().from(providerMessage).where(eq(providerMessage.emailId, emailId)).all();
 	},
 
+	removeByEmailId(c, emailId) {
+		return orm(c).delete(providerMessage).where(eq(providerMessage.emailId, emailId)).run();
+	},
+
 	updateStatus(c, pmId, status, message, eventTime) {
 		const updateData = { status };
 		if (message !== undefined) updateData.message = message;

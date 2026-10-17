@@ -79,6 +79,11 @@ async function emails() {
 	return results;
 }
 
+async function attachments() {
+	const { results } = await env.db.prepare(`SELECT * FROM attachments ORDER BY att_id`).all();
+	return results;
+}
+
 describe('issue 05 — regression: existing paths unaffected by Brevo', () => {
 	it('keeps the legacy resend configuration readable', async () => {
 		await settingService.set(c, { resendTokens: { 'example.com': RESEND_KEY } });
@@ -129,16 +134,47 @@ describe('issue 05 — regression: existing paths unaffected by Brevo', () => {
 		expect(sent.status).toBe(emailConst.status.SENT);
 	});
 
-	it('still allows attachments on the Resend path (Brevo-only restriction)', async () => {
+	it('still allows attachments on the Resend path', async () => {
 		await settingService.set(c, { resendTokens: { 'example.com': RESEND_KEY } });
 		vi.stubGlobal('fetch', vi.fn(async () => new Response(
 			JSON.stringify({ id: 'resend-msg-id' }),
 			{ status: 200, headers: { 'Content-Type': 'application/json' } }
 		)));
 
-		await expect(emailService.send(c, baseParams({
+		const [sent] = await emailService.send(c, baseParams({
 			attachments: [{ filename: 'a.txt', content: 'ZmlsZQ==', contentType: 'text/plain' }],
-		}), userId)).resolves.toBeTruthy();
+		}), userId);
+
+		const rows = await attachments();
+		expect(sent.emailId).toBeDefined();
+		expect(rows).toHaveLength(1);
+		expect(rows[0].filename).toBe('a.txt');
+		expect(rows[0].size).toBe(4);
+	});
+
+	it('still allows attachments on the Cloudflare path', async () => {
+		const { ctx, sent } = cloudflareContext();
+
+		const [result] = await emailService.send(ctx, baseParams({
+			attachments: [{ filename: 'a.txt', content: 'ZmlsZQ==', contentType: 'text/plain' }],
+		}), userId);
+
+		expect(sent[0].attachments).toHaveLength(1);
+		expect(sent[0].attachments[0].filename).toBe('a.txt');
+		expect(result.attList).toHaveLength(1);
+	});
+
+	it('still stores attachments for internal-only mail', async () => {
+		vi.stubGlobal('fetch', vi.fn());
+
+		const [result] = await emailService.send(c, baseParams({
+			receiveEmail: ['friend@example.com'],
+			attachments: [{ filename: 'a.txt', content: 'ZmlsZQ==', contentType: 'text/plain' }],
+		}), userId);
+
+		const rows = await attachments();
+		expect(result.attList).toHaveLength(1);
+		expect(rows.filter(row => row.filename === 'a.txt')).toHaveLength(2);
 	});
 
 	it('still allows reply emails on the Cloudflare path (Brevo-only restriction)', async () => {

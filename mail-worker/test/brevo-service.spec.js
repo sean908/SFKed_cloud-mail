@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import brevoService from '../src/service/brevo-service';
+import brevoService, { BREVO_REQUEST_SIZE_LIMIT } from '../src/service/brevo-service';
+import BizError from '../src/error/biz-error';
 
 const API_KEY = 'xkeysib-SUPERSECRETKEY1234567890';
 
@@ -57,6 +58,22 @@ describe('brevoService.send', () => {
 		expect(result.data).toBeNull();
 		expect(result.error).toBeDefined();
 		expect(result.error.message.length).toBeGreaterThan(0);
+	});
+
+	it.each([
+		['empty array', []],
+		['blank string', '   '],
+		['object', {}],
+		['array with invalid entries', ['<ok@brevo>', null]],
+	])('rejects an invalid messageId shape: %s', async (_label, messageId) => {
+		const fetchMock = vi.fn(async () => jsonResponse({ messageId }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await brevoService.send(API_KEY, params);
+
+		expect(result.data).toBeNull();
+		expect(result.error).toBeDefined();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
 	it('parses a structured (JSON) error response', async () => {
@@ -135,6 +152,117 @@ describe('brevoService.send', () => {
 		const [, init] = fetchMock.mock.calls[0];
 		const body = JSON.parse(init.body);
 		expect(body.scheduledAt).toBeUndefined();
+	});
+
+	it('maps normalized attachments to ordered attachment entries', async () => {
+		const fetchMock = vi.fn(async () => jsonResponse({ messageId: '<x@brevo>' }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await brevoService.send(API_KEY, {
+			...params,
+			attachments: [
+				{ filename: 'first.txt', content: 'aGVsbG8=', contentType: 'text/plain' },
+				{ filename: 'second.txt', content: 'd29ybGQ=', contentType: 'text/plain' },
+				{ filename: 'first.txt', content: 'aGVsbG8=', contentType: 'text/plain' },
+			],
+		});
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.attachment).toEqual([
+			{ name: 'first.txt', content: 'aGVsbG8=' },
+			{ name: 'second.txt', content: 'd29ybGQ=' },
+			{ name: 'first.txt', content: 'aGVsbG8=' },
+		]);
+		expect(body.attachments).toBeUndefined();
+	});
+
+	it('accepts 10 attachments but rejects 11 before fetching', async () => {
+		const fetchMock = vi.fn(async () => jsonResponse({ messageId: '<x@brevo>' }));
+		vi.stubGlobal('fetch', fetchMock);
+		const attachment = { filename: 'a.txt', content: 'YQ==', contentType: 'text/plain' };
+
+		await brevoService.send(API_KEY, {
+			...params,
+			attachments: Array.from({ length: 10 }, () => ({ ...attachment })),
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			attachments: Array.from({ length: 11 }, () => ({ ...attachment })),
+		})).toThrow(BizError);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects a request whose UTF-8 JSON body exceeds 4 MiB before fetching', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			text: '中'.repeat(1_400_000),
+		})).toThrow(BizError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects a single oversized attachment before fetching', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			attachments: [{
+				filename: 'large.bin',
+				content: 'A'.repeat(4 * 1024 * 1024),
+				contentType: 'application/octet-stream',
+			}],
+		})).toThrow(BizError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects multiple attachments whose combined request exceeds 4 MiB', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+		const content = 'A'.repeat(2 * 1024 * 1024);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			attachments: [
+				{ filename: 'one.bin', content, contentType: 'application/octet-stream' },
+				{ filename: 'two.bin', content, contentType: 'application/octet-stream' },
+				{ filename: 'three.bin', content, contentType: 'application/octet-stream' },
+			],
+		})).toThrow(BizError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('accepts a request inside the 4 MiB budget', () => {
+		const prepared = brevoService.prepareRequest({
+			...params,
+			text: 'body '.repeat(1000),
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		});
+
+		expect(prepared.attachments).toHaveLength(1);
+		expect(prepared.attachments[0].size).toBe(5);
+	});
+
+	it('accepts the exact 4 MiB boundary and rejects one byte over', () => {
+		const base = brevoService.prepareRequest({ ...params, text: 'a' });
+		const baseSize = new TextEncoder().encode(base.serializedBody).byteLength;
+		const fill = BREVO_REQUEST_SIZE_LIMIT - baseSize;
+
+		const atLimit = brevoService.prepareRequest({
+			...params,
+			text: 'a' + 'x'.repeat(fill),
+		});
+		expect(new TextEncoder().encode(atLimit.serializedBody).byteLength).toBe(BREVO_REQUEST_SIZE_LIMIT);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			text: 'a' + 'x'.repeat(fill + 1),
+		})).toThrow(BizError);
 	});
 
 	it('never leaks the API key in any error message', async () => {

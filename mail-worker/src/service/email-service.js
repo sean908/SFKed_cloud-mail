@@ -345,13 +345,10 @@ const emailService = {
 				throw new BizError(t('noSendProvider'));
 			}
 
-			// Brevo phase-1 limitations: reject attachments, inline images, reply, thread headers
+			// Brevo phase-1 limitations: reject inline images and reply headers
 			if (resolved.provider === providerConst.BREVO) {
 				if (imageDataList.length > 0) {
 					throw new BizError(t('brevoNotSupportInline'));
-				}
-				if (attachments.length > 0) {
-					throw new BizError(t('brevoNotSupportAtt'));
 				}
 				if (sendType === 'reply') {
 					throw new BizError(t('brevoNotSupportReply'));
@@ -384,6 +381,7 @@ const emailService = {
 		}
 
 		let sendResult = {};
+		let brevoAttachments = [];
 
 		//存在站外邮箱时，按 resolver 结果选择 provider
 		if (!allInternal) {
@@ -406,6 +404,7 @@ const emailService = {
 				sendResult = await this.sendByResend(resolved.apiKey, sendParams);
 			} else if (resolved.provider === providerConst.BREVO) {
 				sendResult = await brevoService.send(resolved.apiKey, sendParams);
+				brevoAttachments = sendResult.attachments || [];
 			}
 
 		}
@@ -464,36 +463,74 @@ const emailService = {
 			emailData.relation = emailRow.messageId;
 		}
 
-		//如果权限有发送次数增加用户发送次数
-		if (roleRow.sendCount && roleRow.sendType !== 'internal') {
-			await userService.incrUserSendCount(c, receiveEmail.length, userId);
-		}
+		const isBrevoSend = !allInternal && resolved?.provider === providerConst.BREVO;
+		const attachmentsToPersist = isBrevoSend ? brevoAttachments : attachments;
+		let emailResult = null;
+		let attList = [];
+		let sendCountIncremented = false;
 
-		//保存到数据库并返回结果
-		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
-
-		//保存 provider message 映射（Brevo/Resend 站外邮件）
-		if (brevoMessageIds) {
-			await providerMessageService.saveMappings(c, emailResult.emailId, providerConst.BREVO, receiveEmail, brevoMessageIds);
-		}
-
-		//保存内嵌附件
-		if (imageDataList.length > 0) {
-			if (imageDataList.length > 10) {
-				throw new BizError(t('imageAttLimit'));
+		try {
+			//如果权限有发送次数增加用户发送次数
+			if (roleRow.sendCount && roleRow.sendType !== 'internal') {
+				await userService.incrUserSendCount(c, receiveEmail.length, userId);
+				sendCountIncremented = true;
 			}
-			await attService.saveArticleAtt(c, imageDataList, userId, accountId, emailResult.emailId);
-		}
 
-		//保存普通附件
-		if (attachments?.length > 0) {
-			if (attachments.length > 10) {
-				throw new BizError(t('attLimit'));
+			//保存到数据库并返回结果
+			emailResult = await orm(c).insert(email).values(emailData).returning().get();
+
+			//保存 provider message 映射（Brevo/Resend 站外邮件）
+			if (brevoMessageIds) {
+				await providerMessageService.saveMappings(c, emailResult.emailId, providerConst.BREVO, receiveEmail, brevoMessageIds);
 			}
-			await attService.saveSendAtt(c, attachments, userId, accountId, emailResult.emailId);
+
+			//保存内嵌附件
+			if (imageDataList.length > 0) {
+				if (imageDataList.length > 10) {
+					throw new BizError(t('imageAttLimit'));
+				}
+				await attService.saveArticleAtt(c, imageDataList, userId, accountId, emailResult.emailId);
+			}
+
+			//保存普通附件
+			if (attachmentsToPersist?.length > 0) {
+				if (attachmentsToPersist.length > 10) {
+					throw new BizError(t('attLimit'));
+				}
+				await attService.saveSendAtt(c, attachmentsToPersist, userId, accountId, emailResult.emailId);
+			}
+
+			attList = await attService.selectByEmailIds(c, [emailResult.emailId]);
+		} catch (persistError) {
+			if (isBrevoSend) {
+				persistError.provider = providerConst.BREVO;
+				persistError.providerMessageIds = brevoMessageIds;
+				console.warn('Brevo accepted the email before local persistence failed', {
+					emailId: emailResult?.emailId,
+					providerMessageIds: brevoMessageIds,
+				});
+				try {
+					await this.compensateBrevoPersistence(c, {
+						emailId: emailResult?.emailId,
+						userId,
+						sendCount: receiveEmail.length,
+						sendCountIncremented,
+						attachmentKeys: brevoAttachments
+							.map(attachment => attachment.key)
+							.filter(Boolean),
+						providerMessageIds: brevoMessageIds,
+					});
+				} catch (compensationError) {
+					console.error('Brevo persistence compensation failed', {
+						emailId: emailResult?.emailId,
+						providerMessageIds: brevoMessageIds,
+						error: compensationError,
+					});
+				}
+			}
+			throw persistError;
 		}
 
-		const attList = await attService.selectByEmailIds(c, [emailResult.emailId]);
 		emailResult.attList = attList;
 
 		//如果全是站内接收方，直接写入数据库
@@ -513,6 +550,57 @@ const emailService = {
 		}
 
 		return [ emailResult ];
+	},
+
+	async compensateBrevoPersistence(c, {
+		emailId,
+		userId,
+		sendCount,
+		sendCountIncremented,
+		attachmentKeys,
+		providerMessageIds,
+	}) {
+		const secondaryErrors = [];
+
+		try {
+			if (emailId) {
+				await attService.removeByEmailIdWithExclusiveKeys(c, emailId, attachmentKeys);
+			}
+		} catch (error) {
+			secondaryErrors.push(['attachments', error]);
+		}
+
+		try {
+			if (emailId) {
+				await providerMessageService.removeByEmailId(c, emailId);
+			}
+		} catch (error) {
+			secondaryErrors.push(['provider messages', error]);
+		}
+
+		try {
+			if (emailId) {
+				await orm(c).delete(email).where(eq(email.emailId, emailId)).run();
+			}
+		} catch (error) {
+			secondaryErrors.push(['email', error]);
+		}
+
+		try {
+			if (sendCountIncremented) {
+				await userService.decrUserSendCount(c, sendCount, userId);
+			}
+		} catch (error) {
+			secondaryErrors.push(['send count', error]);
+		}
+
+		if (secondaryErrors.length > 0) {
+			console.error('Brevo persistence compensation had secondary errors', {
+				emailId,
+				providerMessageIds,
+				errors: secondaryErrors,
+			});
+		}
 	},
 
 	async sendByCloudflareEmail(c, params) {
