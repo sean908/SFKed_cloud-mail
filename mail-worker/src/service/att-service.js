@@ -6,9 +6,21 @@ import constant from '../const/constant';
 import fileUtils from '../utils/file-utils';
 import { attConst } from '../const/entity-const';
 import { parseHTML } from 'linkedom';
-import { v4 as uuidv4 } from 'uuid';
 import domainUtils from '../utils/domain-uitls';
 import settingService from "./setting-service";
+import BizError from '../error/biz-error';
+import { t } from '../i18n/i18n';
+import { normalizeAttachment } from '../utils/attachment-utils';
+
+const MIME_EXT = {
+	jpeg: 'jpg',
+};
+
+function inlineFilename(mimeType, contentId) {
+	const subtype = mimeType.split('/')[1] || 'bin';
+	const ext = MIME_EXT[subtype] || subtype;
+	return `inline-${contentId}.${ext}`;
+}
 
 export async function buildNormalizedAttachmentKey(attachment) {
 	const contentHash = await fileUtils.getBuffHash(attachment.bytes);
@@ -59,7 +71,7 @@ const attService = {
 		).all();
 	},
 
-	async toImageUrlHtml(c, content) {
+	async toImageUrlHtml(c, content, { strict = false } = {}) {
 
 		const { r2Domain } = await settingService.query(c);
 
@@ -69,34 +81,68 @@ const attService = {
 
 		let imageDataList = [];
 
+		//内嵌图片必须与 HTML 的 cid: 引用一一对应，Brevo 的 contentId 才能与引用完全一致
+		//重复 CID 由 brevoService 在发请求前统一校验
+		const resolveCid = () => crypto.randomUUID().replace(/-/g, '');
+
 		for (const img of images) {
 
 			//邮件正文base64图片转cid附件
 			const src = img.getAttribute('src');
 			if (src && src.startsWith('data:image')) {
-				const file = fileUtils.base64ToFile(src);
-				const buff = await file.arrayBuffer();
-				const cid = uuidv4().replace(/-/g, '');
-				const key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(buff) + fileUtils.getExtFileName(file.name);
+				const cid = resolveCid();
+				let attData;
+
+				if (strict) {
+					let normalized;
+					try {
+						//先复用 P1 的规范化逻辑，再用规范化后的 MIME 生成文件名
+						normalized = normalizeAttachment({
+							filename: `inline-${cid}`,
+							content: src,
+							contentId: cid,
+						});
+						normalized.filename = inlineFilename(normalized.contentType, cid);
+					} catch (e) {
+						if (e instanceof BizError) {
+							throw e;
+						}
+						throw new BizError(t('brevoInlineInvalid'));
+					}
+
+					attData = {
+						filename: normalized.filename,
+						mimeType: normalized.contentType,
+						size: normalized.size,
+						buff: normalized.bytes,
+						content: normalized.content,
+						contentId: cid,
+						//与 buildNormalizedAttachmentKey 保持一致，避免 imgReplace 和落库 key 不一致
+						key: await buildNormalizedAttachmentKey(normalized),
+					};
+				} else {
+					const file = fileUtils.base64ToFile(src);
+					const buff = await file.arrayBuffer();
+					attData = {};
+					attData.filename = file.name;
+					attData.mimeType = file.type;
+					attData.size = file.size;
+					attData.buff = buff;
+					attData.content = fileUtils.base64ToDataStr(src);
+					attData.contentId = cid;
+					attData.key = constant.ATTACHMENT_PREFIX
+						+ await fileUtils.getBuffHash(attData.buff)
+						+ fileUtils.getExtFileName(attData.filename);
+				}
 
 				img.setAttribute('src', 'cid:' + cid);
-
-				const attData = {};
-				attData.key = key;
-				attData.filename = file.name;
-				attData.mimeType = file.type;
-				attData.size = file.size;
-				attData.buff = buff;
-				attData.content = fileUtils.base64ToDataStr(src);
-				attData.contentId = cid;
-
 				imageDataList.push(attData);
 			}
 
 			//邮件正文站内图片转cid附件
 			if (src && (src.startsWith(domainUtils.toOssDomain(r2Domain)) || src.startsWith('attachments/'))) {
 
-				const cid = uuidv4().replace(/-/g, '')
+				const cid = resolveCid()
 				img.setAttribute('src', 'cid:' + cid);
 
 				const attData = {};
@@ -137,6 +183,9 @@ const attService = {
 
 			const dbImage = dbImageList.find(dbImage => image.key === dbImage.key);
 			if (!dbImage) {
+				if (strict) {
+					throw new BizError(t('brevoInlineMissing'));
+				}
 				return;
 			}
 
@@ -145,8 +194,20 @@ const attService = {
 			image.mimeType = dbImage.mimeType;
 			image.contentType = dbImage.mimeType;
 
-			const obj = await r2Service.getObj(c, image.key);
+			let obj;
+			try {
+				obj = await r2Service.getObj(c, image.key);
+			} catch (e) {
+				if (strict) {
+					throw new BizError(t('brevoInlineReadError'));
+				}
+				throw e;
+			}
+
 			if (!obj) {
+				if (strict) {
+					throw new BizError(t('brevoInlineMissing'));
+				}
 				return;
 			}
 
@@ -208,15 +269,18 @@ const attService = {
 			attData.emailId = emailId;
 			attData.accountId = accountId;
 			attData.type = attConst.type.EMBED;
-			if (!attData.buff) {
-				continue;
+			attData.mimeType = attData.mimeType || attData.contentType || 'application/octet-stream';
+			//站内图片的对象已存在于对象存储，只落库不重复写入
+			if (attData.buff) {
+				attData.size = attData.size ?? attData.buff.length;
+				await r2Service.putObj(c, attData.key, attData.buff, {
+					contentType: attData.mimeType,
+					cacheControl: `max-age=259200`,
+					contentDisposition: `inline;filename=${attData.filename}`
+				});
 			}
-			await r2Service.putObj(c, attData.key, attData.buff, {
-				contentType: attData.mimeType,
-				cacheControl: `max-age=259200`,
-				contentDisposition: `inline;filename=${attData.filename}`
-			});
 			delete attData.buff;
+			delete attData.content;
 		}
 
 		await orm(c).insert(att).values(attDataList).run();

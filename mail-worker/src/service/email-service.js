@@ -10,7 +10,7 @@ import BizError from '../error/biz-error';
 import emailUtils from '../utils/email-utils';
 import fileUtils from '../utils/file-utils';
 import { Resend } from 'resend';
-import attService from './att-service';
+import attService, { buildNormalizedAttachmentKey } from './att-service';
 import { parseHTML } from 'linkedom';
 import userService from './user-service';
 import roleService from './role-service';
@@ -267,8 +267,6 @@ const emailService = {
 
 		const { resendTokens, brevoTokens, providerMap, r2Domain, send, domainList } = await settingService.query(c);
 
-		let { imageDataList, html } = await attService.toImageUrlHtml(c, content);
-
 		//判断是否关闭发件功能
 		if (send === settingConst.send.CLOSE) {
 			throw new BizError(t('disabledSend'), 403);
@@ -345,17 +343,18 @@ const emailService = {
 				throw new BizError(t('noSendProvider'));
 			}
 
-			// Brevo P3 limitation: inline images are not supported yet.
 			if (resolved.provider === providerConst.BREVO) {
-				if (imageDataList.length > 0) {
-					throw new BizError(t('brevoNotSupportInline'));
-				}
-				// Validate at least text or html present
-				if (!text && !html) {
+				// Validate at least text or html present（html 由 content 派生，此处仍用原始入参判定）
+				if (!text && !content) {
 					throw new BizError(t('emptyEmail'));
 				}
 			}
 		}
+
+		const isBrevoSend = !allInternal && resolved?.provider === providerConst.BREVO;
+
+		//图片解析放在 provider 确定之后：Brevo 使用严格校验，其他 provider 保持宽松行为
+		let { imageDataList, html } = await attService.toImageUrlHtml(c, content, { strict: isBrevoSend });
 
 		//没有发件人名字自动截取
 		if (!name) {
@@ -413,7 +412,13 @@ const emailService = {
 				sendResult = await this.sendByResend(resolved.apiKey, sendParams);
 			} else if (resolved.provider === providerConst.BREVO) {
 				sendResult = await brevoService.send(resolved.apiKey, sendParams);
-				brevoAttachments = sendResult.attachments || [];
+				// Brevo 请求前先算好持久化 key，供落库和失败补偿共用
+				brevoAttachments = await Promise.all(
+					(sendResult.attachments || []).map(async attachment => ({
+						...attachment,
+						key: await buildNormalizedAttachmentKey(attachment),
+					}))
+				);
 			}
 
 		}
@@ -472,8 +477,11 @@ const emailService = {
 			emailData.relation = replyHeaders?.references ?? emailRow.messageId;
 		}
 
-		const isBrevoSend = !allInternal && resolved?.provider === providerConst.BREVO;
-		const attachmentsToPersist = isBrevoSend ? brevoAttachments : attachments;
+		//内嵌图片沿用 toImageUrlHtml 生成的 key（对象存储图片保留原 key，
+		//Base64 图片的 key 与 imgReplace 生成的本地正文一致），只写 EMBED 记录
+		const attachmentsToPersist = isBrevoSend
+			? brevoAttachments.filter(attachment => !attachment.contentId)
+			: attachments;
 		let emailResult = null;
 		let attList = [];
 		let sendCountIncremented = false;
@@ -524,6 +532,7 @@ const emailService = {
 						userId,
 						sendCount: receiveEmail.length,
 						sendCountIncremented,
+						//同时包含普通附件和内嵌图片的 key，保证部分失败也能清理干净
 						attachmentKeys: brevoAttachments
 							.map(attachment => attachment.key)
 							.filter(Boolean),

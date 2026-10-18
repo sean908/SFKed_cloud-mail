@@ -10,6 +10,7 @@ import { emailConst } from '../src/const/entity-const';
 
 const ADMIN_EMAIL = 'admin@example.com';
 const BREVO_KEY = 'xkeysib-compensation-secret';
+const PNG_DATA_URL = 'data:image/png;base64,aGVsbG8=';
 let userId;
 let accountId;
 
@@ -75,6 +76,7 @@ async function dropTriggers() {
 		'fail_email_insert',
 		'fail_provider_message_insert',
 		'fail_attachment_insert',
+		'fail_embed_insert',
 	]) {
 		await env.db.prepare(`DROP TRIGGER IF EXISTS ${name}`).run();
 	}
@@ -251,6 +253,107 @@ describe('Brevo attachment persistence compensation', () => {
 		expect(await tableCount('provider_message')).toBe(0);
 		expect(await tableCount('attachments')).toBe(0);
 		expect(objects.size).toBe(0);
+	});
+
+	it('rolls back the send count and inline image resources when the email insert fails', async () => {
+		await env.db.prepare(`
+			CREATE TRIGGER fail_email_insert
+			BEFORE INSERT ON email
+			WHEN NEW.subject = 'force-inline-email-failure'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced email insert failure');
+			END
+		`).run();
+		const { ctx, objects } = r2Context();
+		const fetchMock = brevoOk('<inline-email-failure@brevo>');
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(emailService.send(ctx, baseParams({
+			subject: 'force-inline-email-failure',
+			content: `<img src="${PNG_DATA_URL}">`,
+		}), userId)).rejects.toThrow('forced email insert failure');
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(0);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('cleans inline image objects and records when the EMBED insert fails', async () => {
+		await env.db.prepare(`
+			CREATE TRIGGER fail_embed_insert
+			BEFORE INSERT ON attachments
+			WHEN NEW.type = 1
+			BEGIN
+				SELECT RAISE(ABORT, 'forced embed insert failure');
+			END
+		`).run();
+		const { ctx, objects } = r2Context();
+		vi.stubGlobal('fetch', brevoOk('<inline-embed-failure@brevo>'));
+
+		await expect(emailService.send(ctx, baseParams({
+			content: `<img src="${PNG_DATA_URL}">`,
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}), userId)).rejects.toThrow('forced embed insert failure');
+
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(0);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('cleans mixed inline and regular resources after a partial R2 failure', async () => {
+		const { ctx, objects } = r2Context({ failPutAt: 2 });
+		vi.stubGlobal('fetch', brevoOk('<inline-r2-failure@brevo>'));
+
+		await expect(emailService.send(ctx, baseParams({
+			content: `<img src="${PNG_DATA_URL}">`,
+			attachments: [{ filename: 'mixed.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}), userId)).rejects.toThrow('forced R2 put failure');
+
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(0);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('keeps a shared inline image object that another email still references', async () => {
+		const { ctx, objects } = r2Context();
+		const key = 'attachments/shared-inline.png';
+		objects.set(key, { bytes: new TextEncoder().encode('hello'), options: {} });
+		const otherEmail = await env.db.prepare(
+			`INSERT INTO email (account_id, user_id, subject, type, status)
+			 VALUES (?, ?, 'other', 1, 1) RETURNING email_id`
+		).bind(accountId, userId).first();
+		await env.db.prepare(
+			`INSERT INTO attachments
+			 (user_id, email_id, account_id, key, filename, mime_type, size, type)
+			 VALUES (?, ?, ?, ?, 'shared-inline.png', 'image/png', 5, 0)`
+		).bind(userId, otherEmail.email_id, accountId, key).run();
+
+		await env.db.prepare(`
+			CREATE TRIGGER fail_embed_insert
+			BEFORE INSERT ON attachments
+			WHEN NEW.type = 1 AND NEW.key = '${key}'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced embed insert failure');
+			END
+		`).run();
+		vi.stubGlobal('fetch', brevoOk('<shared-inline@brevo>'));
+
+		await expect(emailService.send(ctx, baseParams({
+			content: `<img src="${key}">`,
+		}), userId)).rejects.toThrow('forced embed insert failure');
+
+		expect(objects.has(key)).toBe(true);
+		const shared = await env.db.prepare(
+			`SELECT COUNT(*) AS count FROM attachments WHERE key = ?`
+		).bind(key).first();
+		expect(shared.count).toBe(1);
 	});
 
 	it('removes the email, mapping and count when attachment insertion fails', async () => {

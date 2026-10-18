@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import brevoService, { BREVO_REQUEST_SIZE_LIMIT } from '../src/service/brevo-service';
 import BizError from '../src/error/biz-error';
+import { t } from '../src/i18n/i18n';
 
 const API_KEY = 'xkeysib-SUPERSECRETKEY1234567890';
 
@@ -227,6 +228,132 @@ describe('brevoService.send', () => {
 			attachments: Array.from({ length: 11 }, () => ({ ...attachment })),
 		})).toThrow(BizError);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('maps inline attachments with contentId and leaves regular attachments untouched', () => {
+		const prepared = brevoService.prepareRequest({
+			...params,
+			html: '<p>body</p><img src="cid:inline-cid">',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+				{ filename: 'report.pdf', content: 'ZmlsZQ==', contentType: 'application/pdf' },
+			],
+		});
+
+		const body = JSON.parse(prepared.serializedBody);
+		expect(body.attachment).toEqual([
+			{ name: 'logo.png', content: 'aGVsbG8=', contentId: 'inline-cid' },
+			{ name: 'report.pdf', content: 'ZmlsZQ==' },
+		]);
+		expect(body.htmlContent).toContain('cid:inline-cid');
+	});
+
+	it('strips angle brackets from an inline contentId before sending', () => {
+		const prepared = brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid">',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: '<inline-cid>' },
+			],
+		});
+
+		const body = JSON.parse(prepared.serializedBody);
+		expect(body.attachment[0].contentId).toBe('inline-cid');
+	});
+
+	it('counts inline attachments towards the 10-attachment limit', () => {
+		const attachment = { filename: 'a.txt', content: 'YQ==', contentType: 'text/plain' };
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid">',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+				...Array.from({ length: 10 }, () => ({ ...attachment })),
+			],
+		})).toThrow(BizError);
+	});
+
+	it('counts inline attachment bytes towards the 4 MiB limit', () => {
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid">',
+			attachments: [{
+				filename: 'big.png',
+				content: 'A'.repeat(4 * 1024 * 1024),
+				contentType: 'image/png',
+				contentId: 'inline-cid',
+			}],
+		})).toThrow(BizError);
+	});
+
+	it.each([
+		['an empty contentId', ''],
+		['a whitespace-only contentId', '   '],
+		['a contentId with inner whitespace', 'inline cid'],
+		['a contentId with control characters', 'inline\u0000cid'],
+	])('rejects %s before fetching', (_label, contentId) => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid">',
+			attachments: [{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId }],
+		})).toThrow(BizError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects a duplicated inline contentId before fetching', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid">',
+			attachments: [
+				{ filename: 'one.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+				{ filename: 'two.png', content: 'd29ybGQ=', contentType: 'image/png', contentId: 'inline-cid' },
+			],
+		})).toThrow(t('brevoInlineCidDuplicate'));
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects an inline attachment whose contentId is missing from the HTML', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<p>no reference here</p>',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+			],
+		})).toThrow(t('brevoInlineCidMismatch'));
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('does not accept a longer cid reference as a match', () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid-longer">',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+			],
+		})).toThrow(t('brevoInlineCidMismatch'));
+
+		const prepared = brevoService.prepareRequest({
+			...params,
+			html: '<img src="cid:inline-cid"><img src="cid:inline-cid-longer">',
+			attachments: [
+				{ filename: 'logo.png', content: 'aGVsbG8=', contentType: 'image/png', contentId: 'inline-cid' },
+			],
+		});
+		expect(JSON.parse(prepared.serializedBody).attachment[0].contentId).toBe('inline-cid');
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it('rejects a request whose UTF-8 JSON body exceeds 4 MiB before fetching', () => {

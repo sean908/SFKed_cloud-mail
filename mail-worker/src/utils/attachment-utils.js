@@ -104,6 +104,15 @@ export function normalizeAttachment(attachment) {
 		throw new BizError(t('brevoAttachmentEmpty'));
 	}
 
+	let contentId;
+	if (attachment.contentId !== undefined && attachment.contentId !== null) {
+		const rawContentId = String(attachment.contentId).trim().replace(/^<|>$/g, '');
+		if (!rawContentId || /[\u0000-\u001f\u007f<>\s]/.test(rawContentId)) {
+			throw new BizError(t('brevoInlineCidInvalid'));
+		}
+		contentId = rawContentId;
+	}
+
 	const requestMimeType = [attachment.contentType, attachment.mimeType, attachment.type]
 		.find(value => typeof value === 'string' && value.trim());
 	const contentType = normalizeMimeType(requestMimeType || dataUrlMimeType);
@@ -114,6 +123,7 @@ export function normalizeAttachment(attachment) {
 		content: encodeBase64(bytes),
 		bytes,
 		size: bytes.length,
+		contentId,
 		normalized: true,
 	};
 }

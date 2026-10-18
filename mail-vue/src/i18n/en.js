@@ -210,7 +210,7 @@ const en = {
     credentialNotSet: 'Not set',
     tokenLeaveEmpty: 'Leave empty to keep the current key',
     brevoKeyMissing: 'Brevo API key is not configured for this domain',
-    brevoCapabilityHint: 'Brevo supports replies and regular attachments; inline images are not supported yet',
+    brevoCapabilityHint: 'Brevo supports replies, regular attachments and inline images',
     brevoWebhookSecret: 'Brevo Webhook Secret',
     brevoWebhookHeaderHint: 'Add this custom header in the Brevo webhook config: x-brevo-webhook-secret',
     domain: 'Domain',

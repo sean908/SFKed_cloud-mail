@@ -1,10 +1,41 @@
 import { t } from '../i18n/i18n'
 import BizError from '../error/biz-error';
 import { normalizeAttachments } from '../utils/attachment-utils';
+import { parseHTML } from 'linkedom';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 export const BREVO_ATTACHMENT_LIMIT = 10;
 export const BREVO_REQUEST_SIZE_LIMIT = 4 * 1024 * 1024;
+
+//收集正文中实际的 cid: 引用值，避免 cid:abc 被 cid:abcd 之类的子串误命中
+function collectCidReferences(html) {
+	if (!html) {
+		return new Set();
+	}
+
+	const { document } = parseHTML(html);
+	return new Set(Array.from(document.querySelectorAll('img'))
+		.map(img => img.getAttribute('src'))
+		.filter(src => src && src.startsWith('cid:'))
+		.map(src => src.slice(4)));
+}
+
+function validateInlineAttachments(normalizedAttachments, html) {
+	const inlineAttachments = normalizedAttachments.filter(attachment => attachment.contentId);
+	const seenCids = new Set();
+	const referencedCids = collectCidReferences(html);
+
+	for (const attachment of inlineAttachments) {
+		if (seenCids.has(attachment.contentId)) {
+			throw new BizError(t('brevoInlineCidDuplicate'));
+		}
+		seenCids.add(attachment.contentId);
+
+		if (!referencedCids.has(attachment.contentId)) {
+			throw new BizError(t('brevoInlineCidMismatch'));
+		}
+	}
+}
 
 const brevoService = {
 
@@ -15,6 +46,8 @@ const brevoService = {
 		}
 
 		const normalizedAttachments = normalizeAttachments(attachments);
+		validateInlineAttachments(normalizedAttachments, params.html);
+
 		const body = {
 			sender: { name: params.name, email: params.accountEmail },
 			to: params.receiveEmail.map(email => ({ email })),
@@ -39,10 +72,16 @@ const brevoService = {
 			};
 		}
 		if (normalizedAttachments.length > 0) {
-			body.attachment = normalizedAttachments.map(attachment => ({
-				name: attachment.filename,
-				content: attachment.content,
-			}));
+			body.attachment = normalizedAttachments.map(attachment => {
+				const item = {
+					name: attachment.filename,
+					content: attachment.content,
+				};
+				if (attachment.contentId) {
+					item.contentId = attachment.contentId;
+				}
+				return item;
+			});
 		}
 
 		const serializedBody = JSON.stringify(body);
