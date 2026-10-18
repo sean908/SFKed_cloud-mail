@@ -27,6 +27,17 @@ const brevoService = {
 		if (params.html) {
 			body.htmlContent = params.html;
 		}
+		if (params.sendType === 'reply') {
+			const inReplyTo = params.replyHeaders?.inReplyTo;
+			const references = params.replyHeaders?.references;
+			if (!inReplyTo?.trim() || !references?.trim()) {
+				throw new BizError(t('brevoReplyMessageIdMissing'));
+			}
+			body.headers = {
+				'In-Reply-To': inReplyTo,
+				References: references,
+			};
+		}
 		if (normalizedAttachments.length > 0) {
 			body.attachment = normalizedAttachments.map(attachment => ({
 				name: attachment.filename,

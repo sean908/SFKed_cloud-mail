@@ -558,7 +558,7 @@
               <span v-if="!item.maskBrevo && !sendForm[item.domain].brevoKey" class="send-hint error">
                 {{ $t('brevoKeyMissing') }}
               </span>
-              <span class="send-hint">{{ $t('brevoPhaseOneHint') }}</span>
+              <span class="send-hint">{{ $t('brevoCapabilityHint') }}</span>
             </div>
           </div>
         </div>

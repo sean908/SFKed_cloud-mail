@@ -210,7 +210,7 @@ const zh = {
     credentialNotSet: '未设置',
     tokenLeaveEmpty: '留空表示不修改当前 key',
     brevoKeyMissing: '该域名未配置 Brevo API key',
-    brevoPhaseOneHint: '当前阶段 Brevo 暂不支持回复邮件',
+    brevoCapabilityHint: 'Brevo 已支持回复与普通附件，暂不支持内嵌图片',
     brevoWebhookSecret: 'Brevo Webhook 密钥',
     brevoWebhookHeaderHint: '请在 Brevo webhook 配置中添加自定义请求头：x-brevo-webhook-secret',
     domain: '域名',

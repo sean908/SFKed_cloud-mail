@@ -69,7 +69,7 @@ const en = {
 	emailExistDatabase: 'Email already exists in the database',
 	notConfigOss: 'Object storage not configured',
 	brevoApiKey: 'Brevo API key not configured',
-	brevoNotSupportReply: 'Brevo does not support reply emails in this phase',
+	brevoReplyMessageIdMissing: 'The original email has no Message-ID and cannot be replied to',
 	brevoNotSupportInline: 'Brevo does not support inline images in this phase',
 	brevoSendError: 'Brevo send failed',
 	brevoResponseError: 'Brevo returned no message ID',

@@ -345,13 +345,10 @@ const emailService = {
 				throw new BizError(t('noSendProvider'));
 			}
 
-			// Brevo phase-1 limitations: reject inline images and reply headers
+			// Brevo P3 limitation: inline images are not supported yet.
 			if (resolved.provider === providerConst.BREVO) {
 				if (imageDataList.length > 0) {
 					throw new BizError(t('brevoNotSupportInline'));
-				}
-				if (sendType === 'reply') {
-					throw new BizError(t('brevoNotSupportReply'));
 				}
 				// Validate at least text or html present
 				if (!text && !html) {
@@ -368,14 +365,25 @@ const emailService = {
 		let emailRow = {
 			messageId: null
 		};
+		let replyHeaders = null;
 
 		//如果是回复邮件
 		if (sendType === 'reply') {
 
 			emailRow = await this.selectById(c, emailId);
 
-			if (!emailRow) {
+			if (!emailRow || emailRow.userId !== userId) {
 				throw new BizError(t('notExistEmailReply'));
+			}
+
+			if (resolved?.provider === providerConst.BREVO) {
+				if (!emailRow.messageId?.trim()) {
+					throw new BizError(t('brevoReplyMessageIdMissing'));
+				}
+				replyHeaders = {
+					inReplyTo: emailRow.messageId,
+					references: this.buildReplyReferences(emailRow.relation, emailRow.messageId),
+				};
 			}
 
 		}
@@ -395,7 +403,8 @@ const emailService = {
 				html,
 				attachments: [...imageDataList, ...attachments],
 				sendType,
-				messageId: emailRow.messageId
+				messageId: emailRow.messageId,
+				replyHeaders,
 			};
 
 			if (resolved.provider === providerConst.CLOUDFLARE) {
@@ -459,8 +468,8 @@ const emailService = {
 		emailData.recipient = JSON.stringify(recipient);
 
 		if (sendType === 'reply') {
-			emailData.inReplyTo = emailRow.messageId;
-			emailData.relation = emailRow.messageId;
+			emailData.inReplyTo = replyHeaders?.inReplyTo ?? emailRow.messageId;
+			emailData.relation = replyHeaders?.references ?? emailRow.messageId;
 		}
 
 		const isBrevoSend = !allInternal && resolved?.provider === providerConst.BREVO;
@@ -550,6 +559,16 @@ const emailService = {
 		}
 
 		return [ emailResult ];
+	},
+
+	buildReplyReferences(relation, messageId) {
+		const references = typeof relation === 'string' ? relation : '';
+		if (!references.trim()) {
+			return messageId;
+		}
+
+		const lastId = references.trimEnd().split(/\s+/).at(-1);
+		return lastId === messageId ? references : `${references} ${messageId}`;
 	},
 
 	async compensateBrevoPersistence(c, {

@@ -6,6 +6,7 @@ import emailService from '../src/service/email-service';
 import settingService from '../src/service/setting-service';
 import { buildNormalizedAttachmentKey } from '../src/service/att-service';
 import { normalizeAttachment } from '../src/utils/attachment-utils';
+import { emailConst } from '../src/const/entity-const';
 
 const ADMIN_EMAIL = 'admin@example.com';
 const BREVO_KEY = 'xkeysib-compensation-secret';
@@ -51,6 +52,22 @@ async function userSendCount() {
 	const row = await env.db.prepare(`SELECT send_count FROM user WHERE user_id = ?`)
 		.bind(userId).first();
 	return row.send_count;
+}
+
+async function insertOriginalEmail() {
+	const row = await env.db.prepare(
+		`INSERT INTO email (
+			send_email, name, account_id, user_id, subject, content, text,
+			type, status, message_id, in_reply_to, relation, is_del
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING email_id`
+	).bind(
+		'bob@external.com', 'Bob', accountId, userId, 'Original', '<p>original</p>', 'original',
+		emailConst.type.RECEIVE, emailConst.status.RECEIVE,
+		'<parent@example.com>', '<older@example.com>',
+		'<root@example.com> <older@example.com>', 0
+	).first();
+	return row.email_id;
 }
 
 async function dropTriggers() {
@@ -158,6 +175,79 @@ describe('Brevo attachment persistence compensation', () => {
 		expect(error?.providerMessageIds).toEqual(['fail@brevo']);
 		expect(await userSendCount()).toBe(0);
 		expect(await tableCount('email')).toBe(0);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('cleans a reply and its attachment resources when mapping persistence fails', async () => {
+		await env.db.prepare(`
+			CREATE TRIGGER fail_provider_message_insert
+			BEFORE INSERT ON provider_message
+			WHEN NEW.provider_message_id = 'fail-reply@brevo'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced reply mapping insert failure');
+			END
+		`).run();
+		const originalEmailId = await insertOriginalEmail();
+		const { ctx, objects } = r2Context();
+		vi.stubGlobal('fetch', brevoOk('fail-reply@brevo'));
+
+		await expect(emailService.send(ctx, baseParams({
+			sendType: 'reply',
+			emailId: originalEmailId,
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}), userId)).rejects.toThrow('forced reply mapping insert failure');
+
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(1);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('cleans a reply and its attachment resources when attachment persistence fails', async () => {
+		await env.db.prepare(`
+			CREATE TRIGGER fail_attachment_insert
+			BEFORE INSERT ON attachments
+			WHEN NEW.filename = 'reply-fail.txt'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced reply attachment insert failure');
+			END
+		`).run();
+		const originalEmailId = await insertOriginalEmail();
+		const { ctx, objects } = r2Context();
+		vi.stubGlobal('fetch', brevoOk('<reply-attachment-failure@brevo>'));
+
+		await expect(emailService.send(ctx, baseParams({
+			sendType: 'reply',
+			emailId: originalEmailId,
+			attachments: [{ filename: 'reply-fail.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}), userId)).rejects.toThrow('forced reply attachment insert failure');
+
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(1);
+		expect(await tableCount('provider_message')).toBe(0);
+		expect(await tableCount('attachments')).toBe(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('cleans a reply and its attachment resources after a partial R2 failure', async () => {
+		const originalEmailId = await insertOriginalEmail();
+		const { ctx, objects } = r2Context({ failPutAt: 2 });
+		vi.stubGlobal('fetch', brevoOk('<reply-r2-failure@brevo>'));
+
+		await expect(emailService.send(ctx, baseParams({
+			sendType: 'reply',
+			emailId: originalEmailId,
+			attachments: [
+				{ filename: 'reply-one.txt', content: 'b25l', contentType: 'text/plain' },
+				{ filename: 'reply-two.txt', content: 'dHdv', contentType: 'text/plain' },
+			],
+		}), userId)).rejects.toThrow('forced R2 put failure');
+
+		expect(await userSendCount()).toBe(0);
+		expect(await tableCount('email')).toBe(1);
 		expect(await tableCount('provider_message')).toBe(0);
 		expect(await tableCount('attachments')).toBe(0);
 		expect(objects.size).toBe(0);

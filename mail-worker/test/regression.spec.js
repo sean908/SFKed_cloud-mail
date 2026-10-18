@@ -74,6 +74,23 @@ const baseParams = (over = {}) => ({
 	...over,
 });
 
+async function insertOriginalEmail({
+	messageId = '<parent@example.com>',
+	relation = '<root@example.com> <older@example.com>',
+} = {}) {
+	const row = await env.db.prepare(
+		`INSERT INTO email (
+			send_email, name, account_id, user_id, subject, content, text,
+			type, status, message_id, in_reply_to, relation, is_del
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING email_id`
+	).bind(
+		'bob@external.com', 'Bob', accountId, userId, 'Original', '<p>original</p>', 'original',
+		emailConst.type.RECEIVE, emailConst.status.RECEIVE, messageId, '<older@example.com>', relation, 0
+	).first();
+	return row.email_id;
+}
+
 async function emails() {
 	const { results } = await env.db.prepare(`SELECT * FROM email`).all();
 	return results;
@@ -177,17 +194,66 @@ describe('issue 05 — regression: existing paths unaffected by Brevo', () => {
 		expect(rows.filter(row => row.filename === 'a.txt')).toHaveLength(2);
 	});
 
-	it('still allows reply emails on the Cloudflare path (Brevo-only restriction)', async () => {
+	it('still delivers internal replies without an external provider', async () => {
+		const originalEmailId = await insertOriginalEmail();
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(c, baseParams({
+			sendType: 'reply',
+			emailId: originalEmailId,
+			receiveEmail: ['friend@example.com'],
+		}), userId);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe('<parent@example.com>');
+		const received = (await emails()).filter(
+			row => row.type === emailConst.type.RECEIVE && row.to_email === 'friend@example.com'
+		);
+		expect(received).toHaveLength(1);
+	});
+
+	it('still sends reply thread headers on the Cloudflare path', async () => {
 		const { ctx, sent } = cloudflareContext();
 
-		const [original] = await emailService.send(ctx, baseParams(), userId);
-		expect(original.status).toBe(emailConst.status.DELIVERED);
+		const originalEmailId = await insertOriginalEmail();
 
-		await expect(emailService.send(ctx, baseParams({
+		const [result] = await emailService.send(ctx, baseParams({
 			sendType: 'reply',
-			emailId: original.emailId,
-		}), userId)).resolves.toBeTruthy();
+			emailId: originalEmailId,
+		}), userId);
 
+		expect(sent[0].headers).toEqual({
+			'in-reply-to': '<parent@example.com>',
+			references: '<parent@example.com>',
+		});
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe('<parent@example.com>');
+	});
+
+	it('still sends reply thread headers on the Resend path', async () => {
+		await settingService.set(c, { resendTokens: { 'example.com': RESEND_KEY } });
+		const originalEmailId = await insertOriginalEmail();
+		const fetchMock = vi.fn(async () => new Response(
+			JSON.stringify({ id: 'resend-reply-id' }),
+			{ status: 200, headers: { 'Content-Type': 'application/json' } }
+		));
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(c, baseParams({
+			sendType: 'reply',
+			emailId: originalEmailId,
+		}), userId);
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.headers).toEqual({
+			'in-reply-to': '<parent@example.com>',
+			references: '<parent@example.com>',
+		});
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe('<parent@example.com>');
 	});
 
 	it('never persists provider message rows for Cloudflare sends', async () => {

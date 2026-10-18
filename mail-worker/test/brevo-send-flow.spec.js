@@ -75,6 +75,25 @@ async function pmRows() {
 	return results;
 }
 
+async function insertOriginalEmail({
+	messageId = '<parent@example.com>',
+	relation = '<root@example.com> <older@example.com>',
+	ownerUserId = userId,
+	ownerAccountId = accountId,
+} = {}) {
+	const row = await env.db.prepare(
+		`INSERT INTO email (
+			send_email, name, account_id, user_id, subject, content, text,
+			type, status, message_id, in_reply_to, relation, is_del
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING email_id`
+	).bind(
+		'bob@external.com', 'Bob', ownerAccountId, ownerUserId, 'Original', '<p>original</p>', 'original',
+		emailConst.type.RECEIVE, emailConst.status.RECEIVE, messageId, '<older@example.com>', relation, 0
+	).first();
+	return row.email_id;
+}
+
 describe('issue 03 — Brevo send flow', () => {
 	it('sends via Brevo when the domain is mapped to brevo', async () => {
 		const fetchMock = brevoOk('<one@brevo>');
@@ -233,7 +252,7 @@ describe('issue 03 — Brevo send flow', () => {
 		expect(objects.size).toBe(0);
 	});
 
-	it('rejects reply emails before calling Brevo', async () => {
+	it('rejects a reply when the original email does not exist before calling Brevo', async () => {
 		const fetchMock = brevoOk();
 		vi.stubGlobal('fetch', fetchMock);
 
@@ -244,6 +263,232 @@ describe('issue 03 — Brevo send flow', () => {
 		}, userId)).rejects.toThrow();
 
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects a reply when the original email belongs to another user', async () => {
+		const otherUser = await env.db.prepare(
+			`INSERT INTO user (email, type, password, salt, status)
+			 VALUES ('other-owner@example.com', 1, 'x', 'x', 0) RETURNING user_id`
+		).first();
+		const originalEmailId = await insertOriginalEmail({ ownerUserId: otherUser.user_id });
+		const fetchMock = brevoOk();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(emailService.send(c, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+		}, userId)).rejects.toThrow();
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect((await pmRows())).toHaveLength(0);
+	});
+
+	it.each([
+		['empty', ''],
+		['blank', '   '],
+	])('rejects a reply whose original Message-ID is %s without side effects', async (_label, messageId) => {
+		const originalEmailId = await insertOriginalEmail({ messageId });
+		const { ctx, objects } = r2Context();
+		const fetchMock = brevoOk();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(emailService.send(ctx, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+			messageId: '<forged@example.com>',
+			relation: '<forged-root@example.com>',
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}, userId)).rejects.toThrow();
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		const emails = await env.db.prepare(`SELECT * FROM email`).all();
+		expect(emails.results).toHaveLength(1);
+		expect(emails.results[0].email_id).toBe(originalEmailId);
+		expect((await pmRows())).toHaveLength(0);
+		expect((await env.db.prepare(`SELECT * FROM attachments`).all()).results).toHaveLength(0);
+		expect(objects.size).toBe(0);
+	});
+
+	it('sends a single-recipient reply with server-stored thread headers and persists them', async () => {
+		const originalEmailId = await insertOriginalEmail();
+		const fetchMock = brevoOk('<reply@brevo>');
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(c, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+			messageId: '<forged@example.com>',
+			inReplyTo: '<forged-parent@example.com>',
+			relation: '<forged-root@example.com>',
+		}, userId);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.headers).toEqual({
+			'In-Reply-To': '<parent@example.com>',
+			References: '<root@example.com> <older@example.com> <parent@example.com>',
+		});
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe(
+			'<root@example.com> <older@example.com> <parent@example.com>'
+		);
+
+		const mappings = await pmRows();
+		expect(mappings).toHaveLength(1);
+		expect(mappings[0].email_id).toBe(result.emailId);
+		expect(mappings[0].provider_message_id).toBe('<reply@brevo>');
+
+		const original = await env.db.prepare(
+			`SELECT message_id, in_reply_to, relation FROM email WHERE email_id = ?`
+		).bind(originalEmailId).first();
+		expect(original).toEqual({
+			message_id: '<parent@example.com>',
+			in_reply_to: '<older@example.com>',
+			relation: '<root@example.com> <older@example.com>',
+		});
+	});
+
+	it.each([
+		['empty references', '', '<parent@example.com>'],
+		['a matching single id', '<parent@example.com>', '<parent@example.com>'],
+		[
+			'a chain without the parent',
+			'<root@example.com> <older@example.com>',
+			'<root@example.com> <older@example.com> <parent@example.com>',
+		],
+		[
+			'a chain already ending with the parent',
+			'<root@example.com> <parent@example.com>',
+			'<root@example.com> <parent@example.com>',
+		],
+		[
+			'a chain with surrounding whitespace',
+			'  <root@example.com> <parent@example.com>  ',
+			'  <root@example.com> <parent@example.com>  ',
+		],
+	])('builds References for %s', async (_label, relation, expectedReferences) => {
+		const originalEmailId = await insertOriginalEmail({ relation });
+		const fetchMock = brevoOk('<reply@brevo>');
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(c, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+		}, userId);
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.headers).toEqual({
+			'In-Reply-To': '<parent@example.com>',
+			References: expectedReferences,
+		});
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe(expectedReferences);
+	});
+
+	it('sends one multi-recipient reply with shared thread headers and maps every recipient', async () => {
+		const originalEmailId = await insertOriginalEmail();
+		const fetchMock = brevoOk('<shared-reply@brevo>');
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(c, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+			receiveEmail: ['first@external.com', 'second@external.com'],
+		}, userId);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.to).toEqual([
+			{ email: 'first@external.com' },
+			{ email: 'second@external.com' },
+		]);
+		expect(body.headers).toEqual({
+			'In-Reply-To': '<parent@example.com>',
+			References: '<root@example.com> <older@example.com> <parent@example.com>',
+		});
+		expect(result.inReplyTo).toBe('<parent@example.com>');
+		expect(result.relation).toBe(
+			'<root@example.com> <older@example.com> <parent@example.com>'
+		);
+
+		const mappings = await pmRows();
+		expect(mappings).toHaveLength(2);
+		expect(mappings.map(row => row.recipient).sort()).toEqual([
+			'first@external.com',
+			'second@external.com',
+		]);
+		expect(mappings.every(row => row.email_id === result.emailId)).toBe(true);
+		expect(mappings.every(row => row.provider_message_id === '<shared-reply@brevo>')).toBe(true);
+	});
+
+	it('keeps attachment persistence and compensation metadata on a reply', async () => {
+		const originalEmailId = await insertOriginalEmail();
+		const { ctx, objects } = r2Context();
+		const fetchMock = brevoOk('<reply-with-attachment@brevo>');
+		vi.stubGlobal('fetch', fetchMock);
+
+		const [result] = await emailService.send(ctx, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}, userId);
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.headers).toEqual({
+			'In-Reply-To': '<parent@example.com>',
+			References: '<root@example.com> <older@example.com> <parent@example.com>',
+		});
+		expect(body.attachment).toEqual([{ name: 'a.txt', content: 'aGVsbG8=' }]);
+
+		const rows = await env.db.prepare(
+			`SELECT * FROM attachments WHERE email_id = ?`
+		).bind(result.emailId).all();
+		expect(rows.results).toHaveLength(1);
+		expect(objects.size).toBe(1);
+		expect(objects.has(rows.results[0].key)).toBe(true);
+		const mappings = await pmRows();
+		expect(mappings).toHaveLength(1);
+		expect(mappings[0].provider_message_id).toBe('<reply-with-attachment@brevo>');
+	});
+
+	it.each([
+		['API rejection', () => vi.fn(async () => new Response(
+			JSON.stringify({ message: 'reply rejected' }),
+			{ status: 400, headers: { 'Content-Type': 'application/json' } }
+		))],
+		['network failure', () => vi.fn(async () => {
+			throw new Error('reply network unavailable');
+		})],
+	])('keeps reply failure side-effect free on %s', async (_label, makeFetch) => {
+		const originalEmailId = await insertOriginalEmail();
+		const { ctx, objects } = r2Context();
+		const fetchMock = makeFetch();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(emailService.send(ctx, {
+			...baseParams(),
+			sendType: 'reply',
+			emailId: originalEmailId,
+			attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }],
+		}, userId)).rejects.toThrow();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const emails = await env.db.prepare(`SELECT * FROM email`).all();
+		expect(emails.results).toHaveLength(1);
+		expect(emails.results[0].email_id).toBe(originalEmailId);
+		expect(await pmRows()).toHaveLength(0);
+		expect((await env.db.prepare(`SELECT * FROM attachments`).all()).results).toHaveLength(0);
+		expect(objects.size).toBe(0);
 	});
 
 	it('rejects an empty body before calling Brevo', async () => {

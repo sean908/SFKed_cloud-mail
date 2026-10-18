@@ -141,6 +141,40 @@ describe('brevoService.send', () => {
 		expect(body.subject).toBe('Hello');
 		expect(body.textContent).toBe('plain body');
 		expect(body.htmlContent).toBe('<p>html body</p>');
+		expect(body.headers).toBeUndefined();
+	});
+
+	it('maps reply thread data into standard Brevo headers', async () => {
+		const fetchMock = vi.fn(async () => jsonResponse({ messageId: '<x@brevo>' }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await brevoService.send(API_KEY, {
+			...params,
+			sendType: 'reply',
+			replyHeaders: {
+				inReplyTo: '<parent@example.com>',
+				references: '<older@example.com> <parent@example.com>',
+			},
+		});
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(init.body);
+		expect(body.headers).toEqual({
+			'In-Reply-To': '<parent@example.com>',
+			References: '<older@example.com> <parent@example.com>',
+		});
+	});
+
+	it('rejects a reply without complete thread data before fetching', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(() => brevoService.prepareRequest({
+			...params,
+			sendType: 'reply',
+			replyHeaders: { inReplyTo: '   ', references: '<parent@example.com>' },
+		})).toThrow(BizError);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it('does not set scheduled sending', async () => {

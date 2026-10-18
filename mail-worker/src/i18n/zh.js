@@ -69,7 +69,7 @@ const zh = {
 	emailExistDatabase: '有邮箱已存在数据库中',
 	notConfigOss: '对象存储未配置',
 	brevoApiKey: 'Brevo API key 未配置',
-	brevoNotSupportReply: '当前阶段Brevo不支持回复邮件',
+	brevoReplyMessageIdMissing: '原邮件缺少 Message-ID，无法回复',
 	brevoNotSupportInline: '当前阶段Brevo不支持内嵌图片',
 	brevoSendError: 'Brevo发送失败',
 	brevoResponseError: 'Brevo未返回消息ID',
